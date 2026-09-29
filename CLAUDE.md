@@ -111,14 +111,14 @@ Each of these fixed a real bug. Reverting one reintroduces it.
 PR 0 is done. The remaining slices, in order, with the estimates the author agreed
 to:
 
-| PR  | Content                                                                                                                                              | Est.   |
-| --- | ---------------------------------------------------------------------------------------------------------------------------------------------------- | ------ |
-| 0   | ✅ Hygiene: split app/server, config validation, strip debug logs, fix email config, ESLint + Prettier                                               | done   |
+| PR  | Content                                                                                                                                                    | Est.   |
+| --- | ---------------------------------------------------------------------------------------------------------------------------------------------------------- | ------ |
+| 0   | ✅ Hygiene: split app/server, config validation, strip debug logs, fix email config, ESLint + Prettier                                                     | done   |
 | 1   | **MongoDB** + repository layer, collapse `date`+`time` into one `Date`, tests against a real DB, readiness probe — see **PR 1: the engine decision** below | ~4 h   |
-| 2   | Fix auth properly: real user lookup + `token_version` revocation, and fix the _test seeding_ that caused the shortcut                                | ~1.5 h |
-| 3   | `capacity` + idempotent registration + a test proving no overbooking under concurrent requests                                                        | ~2.5 h |
-| 4   | Dockerfile + compose + GitHub Actions CI                                                                                                             | ~1.5 h |
-| 5   | README rewrite                                                                                                                                       | ~1 h   |
+| 2   | Fix auth properly: real user lookup + `token_version` revocation, and fix the _test seeding_ that caused the shortcut                                      | ~1.5 h |
+| 3   | `capacity` + idempotent registration + a test proving no overbooking under concurrent requests                                                             | ~2.5 h |
+| 4   | Dockerfile + compose + GitHub Actions CI                                                                                                                   | ~1.5 h |
+| 5   | README rewrite                                                                                                                                             | ~1 h   |
 
 TypeScript conversion, if wanted, is a final mechanical PR _after_ the domain model
 is real — not before.
@@ -175,12 +175,12 @@ Indexes to create at startup, and the reason each exists. Creating them in start
 rather than a migration directory is deliberate for this slice; it is also the thing to
 revisit first if the project ever gets a second deployment target:
 
-| Index                              | Why                                                                                       |
-| ---------------------------------- | ----------------------------------------------------------------------------------------- |
-| `users.email` unique               | Registration currently scans an array; the uniqueness rule belongs in the database         |
-| `users.uuid` unique                | Public identifier lookups                                                                 |
-| `events.uuid` unique               | Public identifier lookups                                                                 |
-| `events.participants.userUuid`     | Answering "what is this user registered for" without scanning every event — see the dual-write note below |
+| Index                          | Why                                                                                                       |
+| ------------------------------ | --------------------------------------------------------------------------------------------------------- |
+| `users.email` unique           | Registration currently scans an array; the uniqueness rule belongs in the database                        |
+| `users.uuid` unique            | Public identifier lookups                                                                                 |
+| `events.uuid` unique           | Public identifier lookups                                                                                 |
+| `events.participants.userUuid` | Answering "what is this user registered for" without scanning every event — see the dual-write note below |
 
 **Keep registrations embedded in the event document; do not normalise them into their
 own collection.** Today they already live in `event.participants`, and keeping them
@@ -208,21 +208,22 @@ read-then-check-then-write. That is the bug the test exists to catch, and it is 
 the current code has** — `routes/events.js` reads `event.participants`, checks
 `alreadyRegistered`, then pushes, which is a race under any real concurrency.
 
-**One piece of existing debt PR 1 should resolve while it is in here:** registration is
-currently a **dual write** — the participant is pushed onto `event.participants` _and_
-the event id is pushed onto `user.registeredEvents`. Two sources of truth for one fact,
-with nothing keeping them consistent; a failure between the two writes leaves them
-disagreeing permanently. Make `event.participants` the system of record and derive the
-user's list by query against the index above. Do not carry the mirror into the new data
-layer.
+**✅ Resolved ahead of PR 1 — the registration dual write.** Registration used to push
+the participant onto `event.participants` _and_ the event id onto
+`user.registeredEvents`: two sources of truth for one fact, with nothing keeping them
+consistent, so a failure between the two writes left them disagreeing permanently. The
+mirror was never read by anything, so it was deleted outright; `event.participants` is
+now the only record, and the user's list is derived by query against the index above.
+**Do not reintroduce the mirror in the new data layer.**
 
-Environment and setup, to be resolved before starting:
+Environment and setup:
 
-- MongoDB is **not installed on this machine and there is no working Docker daemon**,
-  so PR 1 cannot begin until one of the two exists: a local Community Server install,
-  or a hosted free-tier cluster. Ask the author which; do not assume, and do not
-  install anything without being asked.
-- If it is a hosted cluster, the connection string is a **credential**. It belongs in
+- **Resolved: the author chose a local MongoDB Community Server install** (portable,
+  no admin rights, localhost only, not a service — it must be started by hand before
+  running tests). There is still no working Docker daemon on this machine. Install
+  paths and start/stop commands are machine-specific and live in the gitignored
+  `MONGODB.local.md`, not here.
+- If a hosted cluster is ever used instead, the connection string is a **credential**. It belongs in
   `.env` only. `.env.example` gets a placeholder with no host, no user and no
   password. Never paste a real URI into a committed file, a log line, an error
   message, or the README.
