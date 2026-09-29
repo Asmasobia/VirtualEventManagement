@@ -234,13 +234,9 @@ router.delete("/:id", authenticate, requireOrganizer, (req, res) => {
       });
     }
 
+    // Registrations live inside the event, so deleting the event deletes them.
+    // There is no second copy on the users to sweep — see POST /:id/register.
     store.events.splice(eventIndex, 1);
-
-    store.users.forEach((user) => {
-      user.registeredEvents = user.registeredEvents.filter(
-        (id) => id !== req.params.id,
-      );
-    });
 
     return res.status(200).json({
       success: true,
@@ -300,13 +296,20 @@ router.post("/:id/register", authenticate, async (req, res) => {
       registeredAt: new Date().toISOString(),
     };
 
+    // `event.participants` is the ONLY record of who is registered for what.
+    //
+    // This used to be a dual write: the participant was pushed here AND the
+    // event id was pushed onto `user.registeredEvents`. Two sources of truth
+    // for one fact, with nothing keeping them consistent — a failure between
+    // the two writes (or the silent `userIndex === -1` skip) left them
+    // disagreeing permanently, and unregister and delete-event each had to
+    // remember to repair both. The mirror was also never read by anything.
+    //
+    // "What is this user registered for?" is now a query over events, backed
+    // in PR 1 by an index on `events.participants.userUuid` — derived, not
+    // stored, so it cannot drift.
     store.events[eventIndex].participants.push(participant);
     store.events[eventIndex].updatedAt = new Date().toISOString();
-
-    const userIndex = store.users.findIndex((u) => u.id === req.user.id);
-    if (userIndex !== -1) {
-      store.users[userIndex].registeredEvents.push(event.id);
-    }
 
     const fullUser = store.users.find((u) => u.id === req.user.id);
     sendEventRegistrationEmail(fullUser, event).catch((err) =>
@@ -360,13 +363,6 @@ router.delete("/:id/register", authenticate, (req, res) => {
 
     store.events[eventIndex].participants.splice(participantIndex, 1);
     store.events[eventIndex].updatedAt = new Date().toISOString();
-
-    const userIndex = store.users.findIndex((u) => u.id === req.user.id);
-    if (userIndex !== -1) {
-      store.users[userIndex].registeredEvents = store.users[
-        userIndex
-      ].registeredEvents.filter((id) => id !== req.params.id);
-    }
 
     return res.status(200).json({
       success: true,

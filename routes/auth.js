@@ -84,7 +84,6 @@ router.post("/register", async (req, res) => {
       password: hashedPassword,
       role,
       createdAt: new Date().toISOString(),
-      registeredEvents: [],
     };
 
     store.users.push(newUser);
