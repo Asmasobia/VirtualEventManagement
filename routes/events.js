@@ -13,12 +13,12 @@ const { isFutureDate } = require("../utils/validator");
 //  HELPER: Simplified event response
 // ─────────────────────────────────────────────
 const formatEvent = (event) => ({
-  id:             event.id,
-  title:          event.title,
-  description:    event.description,
-  date:           event.date,
-  time:           event.time,
-  organizerName:  event.organizerName,
+  id: event.id,
+  title: event.title,
+  description: event.description,
+  date: event.date,
+  time: event.time,
+  organizerName: event.organizerName,
   participantCount: event.participants.length,
 });
 
@@ -43,7 +43,7 @@ router.get("/", (req, res) => {
       events = events.filter(
         (e) =>
           e.title.toLowerCase().includes(keyword) ||
-          e.description.toLowerCase().includes(keyword)
+          e.description.toLowerCase().includes(keyword),
       );
     }
 
@@ -51,12 +51,14 @@ router.get("/", (req, res) => {
 
     return res.status(200).json({
       success: true,
-      count:   events.length,
-      events:  events.map(formatEvent),
+      count: events.length,
+      events: events.map(formatEvent),
     });
   } catch (error) {
     console.error("Get events error:", error);
-    return res.status(500).json({ success: false, message: "Internal server error." });
+    return res
+      .status(500)
+      .json({ success: false, message: "Internal server error." });
   }
 });
 
@@ -68,16 +70,20 @@ router.get("/:id", (req, res) => {
     const event = store.events.find((e) => e.id === req.params.id);
 
     if (!event) {
-      return res.status(404).json({ success: false, message: "Event not found." });
+      return res
+        .status(404)
+        .json({ success: false, message: "Event not found." });
     }
 
     return res.status(200).json({
       success: true,
-      event:   formatEvent(event),
+      event: formatEvent(event),
     });
   } catch (error) {
     console.error("Get event error:", error);
-    return res.status(500).json({ success: false, message: "Internal server error." });
+    return res
+      .status(500)
+      .json({ success: false, message: "Internal server error." });
   }
 });
 
@@ -88,9 +94,21 @@ router.post("/", authenticate, requireOrganizer, (req, res) => {
   try {
     const { title, description, date, time } = req.body;
 
-    console.log("CREATE EVENT - req.user :", req.user);
-    console.log("CREATE EVENT - req.body :", req.body);
-
+    // Removed: console.log of req.user and req.body.
+    //
+    // Why this mattered more than it looks. Those two lines wrote the caller's
+    // name and email address, plus the entire request body, to stdout on every
+    // event creation. In any real deployment stdout is collected by a log
+    // aggregator, retained for months, indexed, and readable by anyone with
+    // dashboard access — so a debug line becomes long-lived storage of personal
+    // data in a system that was never designed to hold it, outside whatever
+    // deletion guarantees the app itself makes. Under GDPR that is processing
+    // personal data with no lawful basis and no retention policy.
+    //
+    // The habit to build: debug logs are for the ten minutes you are debugging.
+    // If a log line is worth keeping, it gets IDs, not payloads — `userId` and
+    // `eventId` let you reconstruct what happened from the database, without the
+    // log itself becoming a copy of the data.
     if (!title || !description || !date || !time) {
       return res.status(400).json({
         success: false,
@@ -106,30 +124,30 @@ router.post("/", authenticate, requireOrganizer, (req, res) => {
     }
 
     const newEvent = {
-      id:            uuidv4(),
-      title:         title.trim(),
-      description:   description.trim(),
+      id: uuidv4(),
+      title: title.trim(),
+      description: description.trim(),
       date,
       time,
-      organizerId:   req.user.id,
+      organizerId: req.user.id,
       organizerName: req.user.name,
-      participants:  [],
-      createdAt:     new Date().toISOString(),
-      updatedAt:     new Date().toISOString(),
+      participants: [],
+      createdAt: new Date().toISOString(),
+      updatedAt: new Date().toISOString(),
     };
 
     store.events.push(newEvent);
 
-    console.log("CREATE EVENT - newEvent :", newEvent);
-
     return res.status(201).json({
       success: true,
       message: "Event created successfully.",
-      event:   formatEvent(newEvent),
+      event: formatEvent(newEvent),
     });
   } catch (error) {
     console.error("Create event error:", error);
-    return res.status(500).json({ success: false, message: "Internal server error." });
+    return res
+      .status(500)
+      .json({ success: false, message: "Internal server error." });
   }
 });
 
@@ -141,7 +159,9 @@ router.put("/:id", authenticate, requireOrganizer, async (req, res) => {
     const eventIndex = store.events.findIndex((e) => e.id === req.params.id);
 
     if (eventIndex === -1) {
-      return res.status(404).json({ success: false, message: "Event not found." });
+      return res
+        .status(404)
+        .json({ success: false, message: "Event not found." });
     }
 
     const event = store.events[eventIndex];
@@ -164,29 +184,31 @@ router.put("/:id", authenticate, requireOrganizer, async (req, res) => {
 
     const updatedEvent = {
       ...event,
-      title:       title       ? title.trim()       : event.title,
+      title: title ? title.trim() : event.title,
       description: description ? description.trim() : event.description,
-      date:        date        || event.date,
-      time:        time        || event.time,
-      updatedAt:   new Date().toISOString(),
+      date: date || event.date,
+      time: time || event.time,
+      updatedAt: new Date().toISOString(),
     };
 
     store.events[eventIndex] = updatedEvent;
 
     if (updatedEvent.participants.length > 0) {
-      sendEventUpdateEmail(updatedEvent.participants, updatedEvent).catch((err) =>
-        console.error("Update notification error:", err.message)
+      sendEventUpdateEmail(updatedEvent.participants, updatedEvent).catch(
+        (err) => console.error("Update notification error:", err.message),
       );
     }
 
     return res.status(200).json({
       success: true,
       message: "Event updated successfully.",
-      event:   formatEvent(updatedEvent),
+      event: formatEvent(updatedEvent),
     });
   } catch (error) {
     console.error("Update event error:", error);
-    return res.status(500).json({ success: false, message: "Internal server error." });
+    return res
+      .status(500)
+      .json({ success: false, message: "Internal server error." });
   }
 });
 
@@ -198,7 +220,9 @@ router.delete("/:id", authenticate, requireOrganizer, (req, res) => {
     const eventIndex = store.events.findIndex((e) => e.id === req.params.id);
 
     if (eventIndex === -1) {
-      return res.status(404).json({ success: false, message: "Event not found." });
+      return res
+        .status(404)
+        .json({ success: false, message: "Event not found." });
     }
 
     const event = store.events[eventIndex];
@@ -214,7 +238,7 @@ router.delete("/:id", authenticate, requireOrganizer, (req, res) => {
 
     store.users.forEach((user) => {
       user.registeredEvents = user.registeredEvents.filter(
-        (id) => id !== req.params.id
+        (id) => id !== req.params.id,
       );
     });
 
@@ -224,7 +248,9 @@ router.delete("/:id", authenticate, requireOrganizer, (req, res) => {
     });
   } catch (error) {
     console.error("Delete event error:", error);
-    return res.status(500).json({ success: false, message: "Internal server error." });
+    return res
+      .status(500)
+      .json({ success: false, message: "Internal server error." });
   }
 });
 
@@ -236,7 +262,9 @@ router.post("/:id/register", authenticate, async (req, res) => {
     const eventIndex = store.events.findIndex((e) => e.id === req.params.id);
 
     if (eventIndex === -1) {
-      return res.status(404).json({ success: false, message: "Event not found." });
+      return res
+        .status(404)
+        .json({ success: false, message: "Event not found." });
     }
 
     const event = store.events[eventIndex];
@@ -256,7 +284,7 @@ router.post("/:id/register", authenticate, async (req, res) => {
     }
 
     const alreadyRegistered = event.participants.some(
-      (p) => p.userId === req.user.id
+      (p) => p.userId === req.user.id,
     );
     if (alreadyRegistered) {
       return res.status(409).json({
@@ -266,9 +294,9 @@ router.post("/:id/register", authenticate, async (req, res) => {
     }
 
     const participant = {
-      userId:       req.user.id,
-      name:         req.user.name,
-      email:        req.user.email,
+      userId: req.user.id,
+      name: req.user.name,
+      email: req.user.email,
       registeredAt: new Date().toISOString(),
     };
 
@@ -282,23 +310,25 @@ router.post("/:id/register", authenticate, async (req, res) => {
 
     const fullUser = store.users.find((u) => u.id === req.user.id);
     sendEventRegistrationEmail(fullUser, event).catch((err) =>
-      console.error("Confirmation email error:", err.message)
+      console.error("Confirmation email error:", err.message),
     );
 
     return res.status(200).json({
       success: true,
       message: `Successfully registered for "${event.title}".`,
       registration: {
-        eventId:      event.id,
-        eventTitle:   event.title,
-        eventDate:    event.date,
-        eventTime:    event.time,
+        eventId: event.id,
+        eventTitle: event.title,
+        eventDate: event.date,
+        eventTime: event.time,
         registeredAt: participant.registeredAt,
       },
     });
   } catch (error) {
     console.error("Event registration error:", error);
-    return res.status(500).json({ success: false, message: "Internal server error." });
+    return res
+      .status(500)
+      .json({ success: false, message: "Internal server error." });
   }
 });
 
@@ -310,13 +340,15 @@ router.delete("/:id/register", authenticate, (req, res) => {
     const eventIndex = store.events.findIndex((e) => e.id === req.params.id);
 
     if (eventIndex === -1) {
-      return res.status(404).json({ success: false, message: "Event not found." });
+      return res
+        .status(404)
+        .json({ success: false, message: "Event not found." });
     }
 
     const event = store.events[eventIndex];
 
     const participantIndex = event.participants.findIndex(
-      (p) => p.userId === req.user.id
+      (p) => p.userId === req.user.id,
     );
 
     if (participantIndex === -1) {
@@ -342,7 +374,9 @@ router.delete("/:id/register", authenticate, (req, res) => {
     });
   } catch (error) {
     console.error("Unregister error:", error);
-    return res.status(500).json({ success: false, message: "Internal server error." });
+    return res
+      .status(500)
+      .json({ success: false, message: "Internal server error." });
   }
 });
 
@@ -351,34 +385,38 @@ router.delete("/:id/register", authenticate, (req, res) => {
 // ─────────────────────────────────────────────
 router.get("/:id/participants", authenticate, requireOrganizer, (req, res) => {
   try {
-    console.log("PARTICIPANTS - req.user    :", req.user);
-    console.log("PARTICIPANTS - req.params  :", req.params);
-    console.log("PARTICIPANTS - store.events:", store.events.length);
-
+    // Removed four console.log lines that dumped req.user, req.params, the store
+    // size, and the whole event object — the last of which contains the full
+    // participants array: every attendee's name and email, printed on every call
+    // to this endpoint. This was the worst of the debug logging in the repo,
+    // because it scaled with the number of registered attendees.
     const event = store.events.find((e) => e.id === req.params.id);
 
-    console.log("PARTICIPANTS - event found :", event);
-
     if (!event) {
-      return res.status(404).json({ success: false, message: "Event not found." });
+      return res
+        .status(404)
+        .json({ success: false, message: "Event not found." });
     }
 
     if (event.organizerId !== req.user.id) {
       return res.status(403).json({
         success: false,
-        message: "Access denied. You can only view participants for your own events.",
+        message:
+          "Access denied. You can only view participants for your own events.",
       });
     }
 
     return res.status(200).json({
-      success:          true,
-      eventTitle:       event.title,
+      success: true,
+      eventTitle: event.title,
       participantCount: event.participants.length,
-      participants:     event.participants,
+      participants: event.participants,
     });
   } catch (error) {
     console.error("Get participants error:", error);
-    return res.status(500).json({ success: false, message: "Internal server error." });
+    return res
+      .status(500)
+      .json({ success: false, message: "Internal server error." });
   }
 });
 

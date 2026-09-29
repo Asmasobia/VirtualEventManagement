@@ -1,0 +1,24 @@
+# Files Prettier must not rewrite.
+#
+# Same syntax as .gitignore. Worth keeping short: anything listed here is a file
+# where formatting is NOT guaranteed consistent, which is a small hole in the
+# guarantee the formatter exists to provide.
+
+# Dependencies — not ours to format, and reformatting 40k files is slow enough to
+# make `npm run format` feel broken.
+node_modules/
+
+# ⚠️ NEVER format a lockfile. package-lock.json is a machine-generated artifact
+#    with a byte layout npm itself controls; reformatting it produces an enormous
+#    diff, and the next `npm install` reverts the whole thing. Lockfiles are
+#    committed to be compared by npm, not read by humans.
+package-lock.json
+
+# Generated test-coverage report.
+coverage/
+
+# Secrets and their template. Not a correctness issue — Prettier has no parser for
+# .env files and would skip them anyway — but listing them documents the intent,
+# and the alignment in .env.example is deliberate and hand-made.
+.env
+.env.example

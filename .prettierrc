@@ -1,0 +1,67 @@
+# ─────────────────────────────────────────────────────────────────────────────
+#  Prettier configuration.
+#
+#  Written as YAML rather than JSON on purpose: `.prettierrc` is parsed as JSON or
+#  YAML, and JSON cannot hold comments. A config file nobody can explain is a
+#  config file nobody dares change.
+#
+#  THE POINT OF A FORMATTER, since it is easy to mistake for cosmetics: Prettier
+#  reads the code into a syntax tree and prints the tree back out, discarding
+#  whatever whitespace the author typed. That means formatting stops being an
+#  opinion. Nobody reviews indentation, nobody argues about where a line should
+#  break, and a diff contains only changes in meaning. On a shared codebase that
+#  is worth far more than any individual setting below.
+#
+#  Deliberately short. Most of Prettier's defaults are the result of long
+#  arguments that were settled years ago, and overriding them is how a project
+#  ends up with a house style that fights every tool and tutorial.
+# ─────────────────────────────────────────────────────────────────────────────
+
+# 80 columns. Not about 1970s terminals — about side-by-side review. GitHub's
+# split diff view and most editors' two-pane layouts give each side roughly this
+# much room, and a line that overflows gets soft-wrapped or scrolled off exactly
+# when someone is trying to read it critically. It also applies quiet pressure
+# toward shorter names and shallower nesting.
+printWidth: 80
+
+# Two spaces. Express route handlers nest three or four levels deep by nature
+# (router → handler → try → if), and four-space indentation pushes the body of a
+# guard clause halfway across the screen.
+tabWidth: 2
+
+# Semicolons. JavaScript's automatic semicolon insertion is real and mostly
+# works, but it has sharp edges — a line starting with `(` or `[` continues the
+# previous statement, so omitting semicolons makes correctness depend on what the
+# NEXT line happens to begin with. Writing them removes the class of bug.
+semi: true
+
+# Double quotes, matching what the codebase already used. Arbitrary, and that is
+# the point: it is now decided and never discussed again.
+singleQuote: false
+
+# ⚠️ The one setting with a genuinely practical payoff. `all` puts a trailing
+#    comma after the last item in multi-line lists, INCLUDING function arguments
+#    and parameters. Two benefits:
+#
+#      • Adding an item touches one line instead of two, so `git blame` points at
+#        whoever added the item rather than whoever added the one above it.
+#      • A reordered list produces a diff of the moved lines only.
+#
+#    This was historically avoided because old browsers rejected trailing commas
+#    in function calls. Irrelevant here — `engines.node` is >=20, and Node has
+#    supported them since 8.
+trailingComma: all
+
+# Always parenthesise a single arrow parameter: `(x) => x` rather than `x => x`.
+# Adding a second parameter or a type annotation then does not also require
+# adding parentheses, so the diff stays minimal.
+arrowParens: always
+
+# ⚠️ MATTERS ON WINDOWS SPECIFICALLY, which is where this repo is being written.
+#    Left unset, files written on Windows get CRLF line endings and files written
+#    on macOS or in CI get LF. Git then reports every line of a file as changed
+#    when someone on the other platform touches it, and the real change is
+#    invisible in the noise. Pinning LF means the bytes in the repository are the
+#    same regardless of who committed them — the same reason `.gitattributes`
+#    exists, enforced by the formatter instead of hoped for.
+endOfLine: lf
