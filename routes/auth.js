@@ -12,22 +12,25 @@ const config = require("../config/env");
 //  Token minting, in one place
 // ─────────────────────────────────────────────
 // Extracted because /register and /login had byte-identical `jwt.sign` calls.
-// Duplicated security code is how two code paths drift: the day an `iss` claim or
-// a token version is added, one of the two copies gets missed, and the bug is a
-// silent authorization hole rather than a failing test.
+// Duplicated security code is how two code paths drift: the day an `iss` claim is
+// added, one of the two copies gets missed, and the bug is a silent authorization
+// hole rather than a failing test.
 //
-// ⚠️ NOTE WHAT GOES IN THE PAYLOAD, because a JWT is signed, NOT encrypted. The
-//    payload is base64url — not encryption — so anyone holding the token can read
-//    every field in it, including the user themselves and anything that logs an
-//    Authorization header. Name and email are already visible to their owner, so
-//    they are acceptable here; a password hash, an internal flag, or another
-//    user's data would not be.
-function issueToken(user) {
-  return jwt.sign(
-    { id: user.id, name: user.name, email: user.email, role: user.role },
-    config.jwt.secret,
-    { expiresIn: config.jwt.expiresIn },
-  );
+// The payload is two claims and nothing else:
+//   sub — the user's public id, the standard claim for "who this token is about".
+//   ver — the user's tokenVersion at signing; bumping it revokes this token.
+//
+// Role, name and email used to be in here too. They are gone because
+// authentication now reads them from the database on every request (see
+// middleware/auth.js), and a copy in the token is a copy that goes stale: a role
+// in a token is exactly the claim that outlives a demotion. Removing them also
+// matters because a JWT is signed, NOT encrypted. The payload is base64url, so
+// anyone holding the token, or anything that logs an Authorization header, can
+// read every field in it. The less it carries, the less it leaks.
+function issueToken(user, tokenVersion) {
+  return jwt.sign({ sub: user.id, ver: tokenVersion }, config.jwt.secret, {
+    expiresIn: config.jwt.expiresIn,
+  });
 }
 
 // ─────────────────────────────────────────────
@@ -97,7 +100,7 @@ router.post("/register", async (req, res) => {
       console.error("Welcome email failed:", err.message),
     );
 
-    const token = issueToken(newUser);
+    const token = issueToken(newUser, users.INITIAL_TOKEN_VERSION);
 
     // No hash to strip: the repository never returns it outside
     // findCredentialsByEmail, so `newUser` is safe to send as-is.
@@ -147,8 +150,8 @@ router.post("/login", async (req, res) => {
         .json({ success: false, message: "Invalid email or password." });
     }
 
-    const { user } = credentials;
-    const token = issueToken(user);
+    const { user, tokenVersion } = credentials;
+    const token = issueToken(user, tokenVersion);
 
     return res.status(200).json({
       success: true,
@@ -167,22 +170,35 @@ router.post("/login", async (req, res) => {
 // ─────────────────────────────────────────────
 //  GET /profile
 // ─────────────────────────────────────────────
-router.get("/profile", authenticate, async (req, res) => {
-  // Now async, so it needs the same try/catch as its siblings. Express 5 would
-  // forward a rejection to the error handler anyway, but that answers with the
-  // generic shape; this keeps /profile's failure response matching /login's.
+router.get("/profile", authenticate, (req, res) => {
+  // `authenticate` has just read this user from the database, so `req.user` is
+  // the current record, not a token's copy of it. A second lookup would only
+  // repeat the first.
+  return res.status(200).json({ success: true, user: req.user });
+});
+
+// ─────────────────────────────────────────────
+//  POST /logout-all
+// ─────────────────────────────────────────────
+// Revokes every token this user holds, including the one making the request. "All"
+// rather than "this device" because stateless tokens can only be revoked as a
+// group: the version is per user, not per token. Revoking one device would need a
+// stored token id per session, a server-side list, which is the thing JWTs were
+// chosen to avoid.
+//
+// This is also the mechanism a password change or account disable would call when
+// those exist. They must revoke existing sessions too, or a stolen token outlives
+// the password reset meant to lock the thief out.
+router.post("/logout-all", authenticate, async (req, res) => {
   try {
-    const user = await users.findById(req.user.id);
+    await users.revokeTokens(req.user.id);
 
-    if (!user) {
-      return res
-        .status(404)
-        .json({ success: false, message: "User not found." });
-    }
-
-    return res.status(200).json({ success: true, user });
+    return res.status(200).json({
+      success: true,
+      message: "Logged out of all sessions.",
+    });
   } catch (error) {
-    console.error("Profile error:", error);
+    console.error("Logout-all error:", error);
     return res
       .status(500)
       .json({ success: false, message: "Internal server error." });

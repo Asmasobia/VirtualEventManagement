@@ -86,7 +86,7 @@ app.use(express.json({ limit: "10kb" }));
 app.use(express.urlencoded({ extended: true, limit: "10kb" }));
 
 // ─── Routes ──────────────────────────────────────────────────────────────────
-app.use("/", authRoutes); // POST /register, POST /login, GET /profile
+app.use("/", authRoutes); // POST /register, /login, /logout-all; GET /profile
 app.use("/events", eventRoutes); // GET/POST /events, PUT/DELETE /events/:id, ...
 
 // ─── Health check ────────────────────────────────────────────────────────────

@@ -1,7 +1,6 @@
 const express = require("express");
 const router = express.Router();
 const events = require("../repositories/eventsRepository");
-const users = require("../repositories/usersRepository");
 const { authenticate, requireOrganizer } = require("../middleware/auth");
 const {
   sendEventRegistrationEmail,
@@ -320,15 +319,13 @@ router.post("/:id/register", authenticate, async (req, res) => {
       (p) => p.userId === req.user.id,
     );
 
-    // The recipient comes from the users repository, the system of record,
-    // rather than from the JWT payload. The lookup is chained into the
-    // fire-and-forget promise rather than awaited. A slow read should not delay
-    // the response any more than a slow SMTP server should, and one `.catch()`
-    // covers a failure in either step (invariant 7).
-    users
-      .findById(req.user.id)
-      .then((fullUser) => sendEventRegistrationEmail(fullUser, registered))
-      .catch((err) => console.error("Confirmation email error:", err.message));
+    // `req.user` was read from the users collection by `authenticate`, so it is
+    // the system of record's view of the recipient, not a token's copy. Not
+    // awaited: a slow SMTP server must not delay the response, and the `.catch()`
+    // is what stops a failed send becoming an unhandledRejection (invariant 7).
+    sendEventRegistrationEmail(req.user, registered).catch((err) =>
+      console.error("Confirmation email error:", err.message),
+    );
 
     return res.status(200).json({
       success: true,

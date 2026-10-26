@@ -15,6 +15,7 @@
 //    uuid: "…"                      id: "…"        the public identifier
 //    email, name, role              email, name, role
 //    passwordHash                   — only via findCredentialsByEmail
+//    tokenVersion: number           — only via findCredentialsByEmail / findSession
 //    createdAt: Date                createdAt: Date (serialises to ISO-8601)
 //
 //  The hash is withheld by default rather than stripped by each route. The old
@@ -45,6 +46,13 @@ class EmailTakenError extends Error {
     this.name = "EmailTakenError";
   }
 }
+
+// Every issued token carries the user's tokenVersion, and authentication rejects a
+// token whose version no longer matches. Incrementing the stored number therefore
+// revokes every token issued before it, on every device, without keeping a
+// server-side list of tokens. Exported so /register can sign a new account's first
+// token without a second read.
+const INITIAL_TOKEN_VERSION = 0;
 
 // Looked up per call rather than captured at require time: the client connects
 // after modules load, and the test harness drops and recreates the database.
@@ -89,6 +97,7 @@ async function create({ name, email, passwordHash, role }) {
     email: normaliseEmail(email),
     passwordHash,
     role,
+    tokenVersion: INITIAL_TOKEN_VERSION,
     createdAt: new Date(),
   };
 
@@ -108,14 +117,18 @@ async function create({ name, email, passwordHash, role }) {
 }
 
 /**
- * For login only: the user with this email (case-insensitive) plus their password
- * hash, or null. Kept separate from findById so that reading a user and reading a
- * credential are different calls.
+ * For login only: the user with this email (case-insensitive), their password hash
+ * and their current token version, or null. Kept separate from findById so that
+ * reading a user and reading a credential are different calls.
  */
 async function findCredentialsByEmail(email) {
   const doc = await collection().findOne({ email: normaliseEmail(email) });
   if (!doc) return null;
-  return { user: toDomain(doc), passwordHash: doc.passwordHash };
+  return {
+    user: toDomain(doc),
+    passwordHash: doc.passwordHash,
+    tokenVersion: doc.tokenVersion,
+  };
 }
 
 /** The user with this public id, or null. */
@@ -123,4 +136,38 @@ async function findById(id) {
   return toDomain(await collection().findOne({ uuid: id }));
 }
 
-module.exports = { create, findCredentialsByEmail, findById, EmailTakenError };
+/**
+ * For authentication only: the user with this public id plus their current token
+ * version, or null. Called on every authenticated request, which is why it is one
+ * read on the unique `uuid` index and nothing more.
+ */
+async function findSession(id) {
+  const doc = await collection().findOne({ uuid: id });
+  if (!doc) return null;
+  return { user: toDomain(doc), tokenVersion: doc.tokenVersion };
+}
+
+/**
+ * Invalidate every token this user holds. Returns false if there is no such user.
+ *
+ * `$inc` rather than read-add-one-write: the increment happens inside the
+ * database, so two concurrent revocations cannot both read N and both write N+1,
+ * which would leave a token signed at N+1 by a login in between still valid.
+ */
+async function revokeTokens(id) {
+  const result = await collection().updateOne(
+    { uuid: id },
+    { $inc: { tokenVersion: 1 } },
+  );
+  return result.matchedCount === 1;
+}
+
+module.exports = {
+  create,
+  findCredentialsByEmail,
+  findById,
+  findSession,
+  revokeTokens,
+  INITIAL_TOKEN_VERSION,
+  EmailTakenError,
+};

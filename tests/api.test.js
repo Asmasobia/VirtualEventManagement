@@ -1,5 +1,9 @@
 const request = require("supertest");
+const jwt = require("jsonwebtoken");
 const app = require("../app");
+const config = require("../config/env");
+const db = require("../db/client");
+const users = require("../repositories/usersRepository");
 const { useTestDatabase } = require("./helpers/db");
 
 // ─────────────────────────────────────────────
@@ -178,7 +182,6 @@ describe("POST /login", () => {
 // ─────────────────────────────────────────────
 describe("GET /profile", () => {
   test("should return profile for authenticated user", async () => {
-    // ✅ register and use token in SAME test — store not wiped between
     const token = await registerAndLogin(attendee);
 
     const res = await request(app)
@@ -204,6 +207,163 @@ describe("GET /profile", () => {
 
     expect(res.statusCode).toBe(401);
     expect(res.body.success).toBe(false);
+  });
+});
+
+// ─────────────────────────────────────────────
+//  Authentication reads the system of record
+// ─────────────────────────────────────────────
+// Each test here is a case the old payload-trusting middleware got wrong: the
+// token is still correctly signed and unexpired, but what it claims is no longer
+// true. Accounts are deleted and demoted directly in the database because the API
+// has no endpoint for either yet. What is under test is how authentication reacts
+// when the record changes underneath a live token, not how the record changes.
+describe("authentication against the users collection", () => {
+  const usersCollection = () => db.getDb().collection("users");
+  const profileWith = (token) =>
+    request(app).get("/profile").set("Authorization", `Bearer ${token}`);
+
+  test("rejects the token of a user who has since been deleted", async () => {
+    const token = await registerAndLogin(attendee);
+    await usersCollection().deleteOne({ email: attendee.email });
+
+    const res = await profileWith(token);
+
+    expect(res.statusCode).toBe(401);
+    expect(res.body.message).toBe("Invalid token.");
+  });
+
+  test("applies a demotion on the next request, not at token expiry", async () => {
+    const token = await registerAndLogin(organizer);
+    await usersCollection().updateOne(
+      { email: organizer.email },
+      { $set: { role: "attendee" } },
+    );
+
+    const res = await request(app)
+      .post("/events")
+      .set("Authorization", `Bearer ${token}`)
+      .send(eventData);
+
+    expect(res.statusCode).toBe(403);
+  });
+
+  test("serves the current record, not the one at signing", async () => {
+    const token = await registerAndLogin(attendee);
+    await usersCollection().updateOne(
+      { email: attendee.email },
+      { $set: { name: "John Renamed" } },
+    );
+
+    const res = await profileWith(token);
+
+    expect(res.statusCode).toBe(200);
+    expect(res.body.user.name).toBe("John Renamed");
+  });
+
+  test("rejects a correctly signed token that carries no version", async () => {
+    // The pre-revocation payload shape. A token with no version can never be
+    // revoked, so it must not be accepted as version 0 by default.
+    const user = await users.create({
+      name: "Legacy",
+      email: "legacy@example.com",
+      passwordHash: "not-a-real-hash",
+      role: "attendee",
+    });
+    const legacy = jwt.sign(
+      { id: user.id, sub: user.id, role: "attendee" },
+      config.jwt.secret,
+    );
+
+    const res = await profileWith(legacy);
+
+    expect(res.statusCode).toBe(401);
+  });
+
+  test("answers 500, not 401, when the user lookup itself fails", async () => {
+    // A 401 during a database outage would tell every client its token is bad,
+    // and a well-behaved client responds by discarding it and logging out.
+    const token = await registerAndLogin(attendee);
+    const lookup = jest
+      .spyOn(users, "findSession")
+      .mockRejectedValueOnce(new Error("connection lost"));
+    const consoleError = jest
+      .spyOn(console, "error")
+      .mockImplementation(() => {});
+
+    try {
+      const res = await profileWith(token);
+      expect(res.statusCode).toBe(500);
+    } finally {
+      lookup.mockRestore();
+      consoleError.mockRestore();
+    }
+  });
+});
+
+// ─────────────────────────────────────────────
+//  POST /logout-all
+// ─────────────────────────────────────────────
+describe("POST /logout-all", () => {
+  const loginAs = async (user) =>
+    (
+      await request(app)
+        .post("/login")
+        .send({ email: user.email, password: user.password })
+    ).body.token;
+
+  test("revokes every token the user holds, on every device", async () => {
+    const laptop = await registerAndLogin(attendee);
+    const phone = await loginAs(attendee);
+
+    const res = await request(app)
+      .post("/logout-all")
+      .set("Authorization", `Bearer ${phone}`);
+    expect(res.statusCode).toBe(200);
+
+    for (const token of [laptop, phone]) {
+      const after = await request(app)
+        .get("/profile")
+        .set("Authorization", `Bearer ${token}`);
+      expect(after.statusCode).toBe(401);
+      // Same message as a deleted account: a revoked token must not reveal that
+      // its account still exists.
+      expect(after.body.message).toBe("Invalid token.");
+    }
+  });
+
+  test("leaves a login made afterwards working", async () => {
+    const before = await registerAndLogin(attendee);
+    await request(app)
+      .post("/logout-all")
+      .set("Authorization", `Bearer ${before}`);
+
+    const fresh = await loginAs(attendee);
+    const res = await request(app)
+      .get("/profile")
+      .set("Authorization", `Bearer ${fresh}`);
+
+    expect(res.statusCode).toBe(200);
+  });
+
+  test("does not touch another user's sessions", async () => {
+    const mine = await registerAndLogin(attendee);
+    const theirs = await registerAndLogin(organizer);
+
+    await request(app)
+      .post("/logout-all")
+      .set("Authorization", `Bearer ${mine}`);
+
+    const res = await request(app)
+      .get("/profile")
+      .set("Authorization", `Bearer ${theirs}`);
+    expect(res.statusCode).toBe(200);
+  });
+
+  test("should fail without authentication", async () => {
+    const res = await request(app).post("/logout-all");
+
+    expect(res.statusCode).toBe(401);
   });
 });
 

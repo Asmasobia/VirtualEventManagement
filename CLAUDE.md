@@ -45,7 +45,7 @@ machine, say so explicitly and label it unverified — never round it up to "don
 ```bash
 npm run lint          # eslint . — prints nothing on success
 npm run format:check  # prettier --check .
-npm test              # jest — 99 tests currently passing
+npm test              # jest — 113 tests currently passing
 ```
 
 `npm run format` writes; `format:check` only verifies. CI uses `check`, because a CI
@@ -104,21 +104,31 @@ Each of these fixed a real bug. Reverting one reintroduces it.
    on `unhandledRejection`, so an un-awaited rejection without a handler takes the
    server down. A failed courtesy email must not do that.
 
+8. **Authentication reads the user from the database on every request.** The JWT
+   carries only `sub` (the public id) and `ver` (the user's `tokenVersion`); role,
+   name and email come from the users collection. A JWT is signed, not encrypted,
+   and proves a claim was signed in the past, not that it is still true. Trusting
+   the payload let a deleted user keep access and a demoted organizer keep organizer
+   powers, with no way to revoke either. That shortcut was taken to make a test
+   fixture pass, weakening production auth to suit a test; if a test needs a token,
+   it must create the user the token refers to. Every rejected token gets the same
+   `401 "Invalid token."`, and a failed lookup is a 500, never a 401.
+
 ---
 
 ## Roadmap
 
-PR 0 is done. The remaining slices, in order, with the estimates the author agreed
+PR 0, PR 1 and PR 2 are done. The remaining slices, in order, with the estimates the author agreed
 to:
 
-| PR  | Content                                                                                                                                                    | Est.   |
-| --- | ---------------------------------------------------------------------------------------------------------------------------------------------------------- | ------ |
-| 0   | ✅ Hygiene: split app/server, config validation, strip debug logs, fix email config, ESLint + Prettier                                                     | done   |
-| 1   | **MongoDB** + repository layer, collapse `date`+`time` into one `Date`, tests against a real DB, readiness probe — see **PR 1: the engine decision** below | ~4 h   |
-| 2   | Fix auth properly: real user lookup + `token_version` revocation, and fix the _test seeding_ that caused the shortcut                                      | ~1.5 h |
-| 3   | `capacity` + idempotent registration + a test proving no overbooking under concurrent requests                                                             | ~2.5 h |
-| 4   | Dockerfile + compose + GitHub Actions CI                                                                                                                   | ~1.5 h |
-| 5   | README rewrite                                                                                                                                             | ~1 h   |
+| PR  | Content                                                                                                                                                       | Est.   |
+| --- | ------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------ |
+| 0   | ✅ Hygiene: split app/server, config validation, strip debug logs, fix email config, ESLint + Prettier                                                        | done   |
+| 1   | ✅ **MongoDB** + repository layer, collapse `date`+`time` into one `Date`, tests against a real DB, readiness probe — see **PR 1: the engine decision** below | done   |
+| 2   | ✅ Fix auth properly: real user lookup + `tokenVersion` revocation (`POST /logout-all`), and fix the _test seeding_ that caused the shortcut                  | done   |
+| 3   | `capacity` + idempotent registration + a test proving no overbooking under concurrent requests                                                                | ~2.5 h |
+| 4   | Dockerfile + compose + GitHub Actions CI                                                                                                                      | ~1.5 h |
+| 5   | README rewrite                                                                                                                                                | ~1 h   |
 
 TypeScript conversion, if wanted, is a final mechanical PR _after_ the domain model
 is real — not before.
@@ -233,16 +243,6 @@ Environment and setup:
 ## Known deliberate debt
 
 Documented rather than hidden. Do not "fix" these out of order; each has a PR.
-
-- **`middleware/auth.js` trusts the JWT payload and does not look the user up.**
-  This is the most serious issue in the codebase and it is flagged in-file. A deleted
-  user keeps access, a demoted organizer keeps organizer powers, and there is no
-  revocation. It was changed to make a test-fixture problem go away, which is the
-  wrong direction of causation — production auth was weakened to suit a test. **PR 2**
-  fixes both halves: the real lookup _and_ the test seeding.
-  Remember a JWT is signed, not encrypted, and proves a claim was signed in the past,
-  not that it is still true. Anything mutable (role, account status) must come from
-  the system of record.
 
 - **Email is fire-and-forget.** If the process dies between committing a
   registration and the SMTP call completing, the email is lost with no record that it

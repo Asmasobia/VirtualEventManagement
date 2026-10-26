@@ -81,3 +81,48 @@ describe("usersRepository", () => {
     }
   });
 });
+
+describe("usersRepository token versions", () => {
+  it("starts a new user at the initial version", async () => {
+    const created = await users.create(alice);
+    const session = await users.findSession(created.id);
+
+    expect(session).toEqual({
+      user: created,
+      tokenVersion: users.INITIAL_TOKEN_VERSION,
+    });
+  });
+
+  it("returns null for the session of an unknown id", async () => {
+    expect(await users.findSession("no-such-id")).toBeNull();
+  });
+
+  it("gives login the same version authentication will check", async () => {
+    const created = await users.create(alice);
+    await users.revokeTokens(created.id);
+
+    const credentials = await users.findCredentialsByEmail(alice.email);
+    const session = await users.findSession(created.id);
+    expect(credentials.tokenVersion).toBe(session.tokenVersion);
+  });
+
+  it("reports whether there was a user to revoke", async () => {
+    const created = await users.create(alice);
+
+    expect(await users.revokeTokens(created.id)).toBe(true);
+    expect(await users.revokeTokens("no-such-id")).toBe(false);
+  });
+
+  // Read-add-one-write would lose increments here: several revocations reading
+  // the same N and all writing N+1. `$inc` applies each one inside the database.
+  it("counts every one of several concurrent revocations", async () => {
+    const created = await users.create(alice);
+
+    await Promise.all(
+      Array.from({ length: 5 }, () => users.revokeTokens(created.id)),
+    );
+
+    const session = await users.findSession(created.id);
+    expect(session.tokenVersion).toBe(users.INITIAL_TOKEN_VERSION + 5);
+  });
+});
