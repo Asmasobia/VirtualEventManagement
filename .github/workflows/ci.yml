@@ -1,0 +1,129 @@
+# ─────────────────────────────────────────────────────────────────────────────
+#  CI: two independent jobs, because they answer different questions.
+#
+#    checks     "Is the code correct?"  lint, format, and the test suite against a
+#               real MongoDB (CLAUDE.md: a mocked driver tests the mock).
+#    container  "Does the shipped artifact work?"  builds the production image, runs
+#               it, and exercises startup, readiness and graceful shutdown.
+#
+#  The suite passing says nothing about whether the image starts — an allowlisted
+#  .dockerignore that omits a source directory, or a missing runtime dependency,
+#  only fails when the container actually runs. Hence the second job.
+# ─────────────────────────────────────────────────────────────────────────────
+
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+# The default GITHUB_TOKEN can write to the repo. Nothing here needs that, so grant
+# the minimum: if a dependency's install script were ever compromised, it would
+# find a read-only token.
+permissions:
+  contents: read
+
+# A newer push to the same ref makes an in-flight run obsolete. Cancelling it saves
+# minutes and avoids a stale run reporting after a newer one.
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  checks:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    # A real MongoDB for the integration tests. The suite defaults to
+    # mongodb://127.0.0.1:27017/virtual_events_test under NODE_ENV=test (see
+    # config/env.js), which is exactly where this service is published — so no
+    # connection string, and no secret, needs configuring here.
+    services:
+      mongo:
+        image: mongo:8.0
+        ports:
+          - 27017:27017
+        # Without a health gate, GitHub starts the steps as soon as the container
+        # exists, and the first test races the database's startup.
+        options: >-
+          --health-cmd "mongosh --quiet --eval 'db.adminCommand(\"ping\").ok'"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          # Matches the Dockerfile's base image, so CI tests on the Node version
+          # that ships.
+          node-version: 22
+          cache: npm
+
+      - run: npm ci
+      - run: npm run lint
+      # `check`, not the writing variant: a CI job that silently rewrites files is
+      # worse than one that fails.
+      - run: npm run format:check
+      - run: npm test
+
+  container:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build image
+        run: docker build -t events-api:ci .
+
+      - name: Start MongoDB and the API
+        run: |
+          docker network create ci-net
+          docker run -d --name mongo --network ci-net mongo:8.0
+
+          # Generated per run and never printed: the app rejects short or
+          # placeholder secrets outside NODE_ENV=test, so this also exercises that
+          # validation. No email variables are set, so email is disabled.
+          docker run -d --name api --network ci-net -p 3000:3000 \
+            -e NODE_ENV=production \
+            -e MONGODB_URI=mongodb://mongo:27017/virtual_events \
+            -e JWT_SECRET="$(openssl rand -base64 48)" \
+            -e JWT_EXPIRES_IN=1h \
+            events-api:ci
+
+      # Poll /ready (not /health): the point is that the app connected to the
+      # database. If the container dies instead, fail immediately with its logs
+      # rather than waiting out the loop.
+      - name: Wait for readiness
+        run: |
+          for i in $(seq 1 30); do
+            if curl -fsS http://127.0.0.1:3000/ready; then
+              echo; echo "ready after ${i}s"; exit 0
+            fi
+            if [ "$(docker inspect -f '{{.State.Running}}' api)" != "true" ]; then
+              echo "api container exited before becoming ready"; docker logs api; exit 1
+            fi
+            sleep 1
+          done
+          echo "not ready after 30s"; docker logs api; exit 1
+
+      - name: Liveness endpoint answers
+        run: curl -fsS http://127.0.0.1:3000/health
+
+      # Closes the "graceful shutdown is UNVERIFIED" debt in CLAUDE.md. On Windows
+      # the signal never reached Node; on Linux, with tini as PID 1, it should.
+      # `docker stop` sends SIGTERM, waits 10s, then SIGKILLs — so an exit code of 0
+      # plus the closing log line proves the handler ran rather than the kill.
+      - name: Graceful shutdown on SIGTERM
+        run: |
+          docker stop api
+          docker logs api
+          test "$(docker inspect -f '{{.State.ExitCode}}' api)" = "0"
+          docker logs api 2>&1 | grep -q "MongoDB connection closed"
+
+      - name: Clean up
+        if: always()
+        run: docker rm -f api mongo

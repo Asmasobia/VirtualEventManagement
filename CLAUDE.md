@@ -127,7 +127,7 @@ to:
 | 1   | ✅ **MongoDB** + repository layer, collapse `date`+`time` into one `Date`, tests against a real DB, readiness probe — see **PR 1: the engine decision** below | done   |
 | 2   | ✅ Fix auth properly: real user lookup + `tokenVersion` revocation (`POST /logout-all`), and fix the _test seeding_ that caused the shortcut                  | done   |
 | 3   | ✅ `capacity` + idempotent registration + a test proving no overbooking under concurrent requests                                                             | done   |
-| 4   | Dockerfile + compose + GitHub Actions CI                                                                                                                      | ~1.5 h |
+| 4   | 🟡 Dockerfile + compose + GitHub Actions CI — written, **not yet run** (no Docker on the dev machine); done once the first CI run is green                    | ~1.5 h |
 | 5   | README rewrite                                                                                                                                                | ~1 h   |
 
 TypeScript conversion, if wanted, is a final mechanical PR _after_ the domain model
@@ -253,8 +253,10 @@ Documented rather than hidden. Do not "fix" these out of order; each has a PR.
 - **Graceful shutdown in `server.js` is UNVERIFIED.** The SIGTERM/SIGINT handlers are
   written but were never observed running: `kill -TERM` from Git Bash does not
   deliver a catchable signal to Node on Windows, so the process exited cleanly while
-  the handler's log lines never appeared. **Verify this in PR 4 under Docker on
-  Linux** and do not describe it as working until then.
+  the handler's log lines never appeared. The `container` job in
+  `.github/workflows/ci.yml` now checks it on Linux (`docker stop`, exit code 0,
+  "MongoDB connection closed" in the logs). **Do not describe it as working until
+  that job has actually run green**, then delete this item.
 
 - **Capacity cannot be changed after an event is created.** `PUT /events/:id`
   ignores it. Lowering it safely means one conditional update whose filter
