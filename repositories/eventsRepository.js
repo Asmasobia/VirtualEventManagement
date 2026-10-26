@@ -11,7 +11,7 @@
 //    organizerUuid                     organizerId
 //    participants[].userUuid           participants[].userId
 //    title, description, startsAt,     (unchanged)
-//    organizerName, createdAt,
+//    capacity, organizerName, createdAt,
 //    updatedAt, participants[].name,
 //    participants[].email,
 //    participants[].registeredAt
@@ -25,22 +25,25 @@
 //  mapping happens here and nowhere else.
 //
 //  Registrations stay EMBEDDED in the event (see CLAUDE.md). That puts the
-//  participant list in the same document as everything a registration rule
-//  needs, so one atomic update can enforce a rule with no transaction. See
-//  addParticipant.
+//  participant list in the same document as the capacity, so one atomic update
+//  can enforce both registration rules (no duplicates, no overbooking) with no
+//  transaction. See addParticipant.
 // ─────────────────────────────────────────────────────────────────────────────
 
 const { randomUUID } = require("crypto");
 const { getDb } = require("../db/client");
 
 /**
- * Thrown by `addParticipant` when the user is already registered. A domain
+ * Thrown by `addParticipant` when the event has no places left. A domain
  * error, so the route answers 409 by checking a type it owns.
+ *
+ * There is no "already registered" error. A repeat registration is not a
+ * failure: see addParticipant.
  */
-class AlreadyRegisteredError extends Error {
+class EventFullError extends Error {
   constructor() {
-    super("You are already registered for this event.");
-    this.name = "AlreadyRegisteredError";
+    super("This event is full.");
+    this.name = "EventFullError";
   }
 }
 
@@ -68,6 +71,7 @@ function toDomain(doc) {
     title: doc.title,
     description: doc.description,
     startsAt: doc.startsAt,
+    capacity: doc.capacity,
     organizerId: doc.organizerUuid,
     organizerName: doc.organizerName,
     participants: doc.participants.map(participantToDomain),
@@ -88,12 +92,15 @@ function escapeRegex(text) {
 /**
  * Insert a new event with no participants and return it. `startsAt` is a Date
  * (one UTC instant); parsing the client's string is the route's job, so a
- * string can never be stored here and sort wrongly later.
+ * string can never be stored here and sort wrongly later. `capacity` is a
+ * positive integer, also validated by the route. A missing capacity would
+ * make the event permanently full (see addParticipant), not unlimited.
  */
 async function create({
   title,
   description,
   startsAt,
+  capacity,
   organizerId,
   organizerName,
 }) {
@@ -103,6 +110,7 @@ async function create({
     title,
     description,
     startsAt,
+    capacity,
     organizerUuid: organizerId,
     organizerName,
     participants: [],
@@ -190,18 +198,34 @@ async function remove(id) {
 }
 
 /**
- * Register a user and return the updated event. Returns null if there is no
- * such event; rejects with AlreadyRegisteredError if they are already on it.
+ * Register a user. Resolves to `{ event, created }`, or null if there is no
+ * such event; rejects with EventFullError if there is no place left.
+ *
+ * `created` is false when the user was ALREADY registered. That is a success,
+ * not an error: registration is idempotent, so a client whose response got
+ * lost can retry and get the same answer, not a 409 for something that
+ * actually worked. The caller uses `created` to avoid doing the side effects
+ * (the confirmation email) twice.
  *
  * ONE conditional update, not read-check-write. The filter matches the event
- * only if this user is NOT already in its participants, and the update pushes
- * them. MongoDB applies the filter and the update to a single document
- * atomically, so of two concurrent identical requests exactly one can match.
- * The other matches nothing. The old code read the array, checked it, then
- * pushed, and both requests could pass the check before either pushed.
+ * only if BOTH rules hold: this user is not already a participant, and there
+ * are fewer participants than `capacity`. The update pushes the user. MongoDB
+ * evaluates the filter and applies the update to a single document atomically,
+ * so of any number of concurrent requests, only as many as there are free
+ * places can match. The rest match nothing. A version of this that read the
+ * event, checked the count, then pushed would let every concurrent request
+ * pass the check before any of them pushed. That is overbooking, and it is the
+ * bug the concurrency tests exist to catch.
  *
- * PR 3 adds capacity by adding one more condition to the same filter (fewer
- * than N participants). Still one operation, still no transaction.
+ * `$expr` is needed because the limit is another field of the same document,
+ * and a plain query can only compare a field to a constant. It does not cost
+ * an index: the `uuid` condition finds the single document through its unique
+ * index, and `$expr` is then checked against that one document only.
+ *
+ * An event stored without a `capacity` (none can be created that way now) has
+ * a missing field, which sorts below every number, so it reads as full. That
+ * fails closed: an event with no recorded limit takes no new registrations
+ * instead of taking unlimited ones.
  */
 async function addParticipant(eventId, { userId, name, email }) {
   const participant = {
@@ -212,25 +236,38 @@ async function addParticipant(eventId, { userId, name, email }) {
   };
 
   const doc = await collection().findOneAndUpdate(
-    { uuid: eventId, "participants.userUuid": { $ne: userId } },
+    {
+      uuid: eventId,
+      "participants.userUuid": { $ne: userId },
+      $expr: { $lt: [{ $size: "$participants" }, "$capacity"] },
+    },
     {
       $push: { participants: participant },
       $set: { updatedAt: participant.registeredAt },
     },
     { returnDocument: "after" },
   );
-  if (doc) return toDomain(doc);
+  if (doc) return { event: toDomain(doc), created: true };
 
-  // Matched nothing. Either the event does not exist or the user is already
-  // registered, and the update cannot say which. This read only picks the right
-  // error message. It does not enforce anything, so the gap between the two
-  // calls cannot let a duplicate in.
-  const exists = await collection().countDocuments(
-    { uuid: eventId },
-    { limit: 1 },
-  );
-  if (!exists) return null;
-  throw new AlreadyRegisteredError();
+  // Matched nothing, so one of three things is true: the event does not exist,
+  // the user is already on it, or it is full. The update cannot say which, so
+  // this read finds out. It only decides what to REPORT. Every rule was already
+  // enforced by the update above, so nothing that happens between the two calls
+  // can let a duplicate or an extra participant in.
+  //
+  // "Already registered" is checked before "full" on purpose. A full event the
+  // user is already on is a success for them: their retry must get a 200.
+  //
+  // One case reads wrongly, and it is acceptable. If somebody unregisters
+  // between the update and this read, the event is full at the moment the
+  // update ran but has a free place now, and this reports full anyway. That
+  // was true when the decision was made, and a retry would succeed.
+  const current = toDomain(await collection().findOne({ uuid: eventId }));
+  if (!current) return null;
+  if (current.participants.some((p) => p.userId === userId)) {
+    return { event: current, created: false };
+  }
+  throw new EventFullError();
 }
 
 /**
@@ -259,5 +296,5 @@ module.exports = {
   remove,
   addParticipant,
   removeParticipant,
-  AlreadyRegisteredError,
+  EventFullError,
 };

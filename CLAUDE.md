@@ -45,7 +45,7 @@ machine, say so explicitly and label it unverified — never round it up to "don
 ```bash
 npm run lint          # eslint . — prints nothing on success
 npm run format:check  # prettier --check .
-npm test              # jest — 113 tests currently passing
+npm test              # jest — 127 tests currently passing
 ```
 
 `npm run format` writes; `format:check` only verifies. CI uses `check`, because a CI
@@ -118,7 +118,7 @@ Each of these fixed a real bug. Reverting one reintroduces it.
 
 ## Roadmap
 
-PR 0, PR 1 and PR 2 are done. The remaining slices, in order, with the estimates the author agreed
+PR 0 through PR 3 are done. The remaining slices, in order, with the estimates the author agreed
 to:
 
 | PR  | Content                                                                                                                                                       | Est.   |
@@ -126,7 +126,7 @@ to:
 | 0   | ✅ Hygiene: split app/server, config validation, strip debug logs, fix email config, ESLint + Prettier                                                        | done   |
 | 1   | ✅ **MongoDB** + repository layer, collapse `date`+`time` into one `Date`, tests against a real DB, readiness probe — see **PR 1: the engine decision** below | done   |
 | 2   | ✅ Fix auth properly: real user lookup + `tokenVersion` revocation (`POST /logout-all`), and fix the _test seeding_ that caused the shortcut                  | done   |
-| 3   | `capacity` + idempotent registration + a test proving no overbooking under concurrent requests                                                                | ~2.5 h |
+| 3   | ✅ `capacity` + idempotent registration + a test proving no overbooking under concurrent requests                                                             | done   |
 | 4   | Dockerfile + compose + GitHub Actions CI                                                                                                                      | ~1.5 h |
 | 5   | README rewrite                                                                                                                                                | ~1 h   |
 
@@ -255,6 +255,12 @@ Documented rather than hidden. Do not "fix" these out of order; each has a PR.
   deliver a catchable signal to Node on Windows, so the process exited cleanly while
   the handler's log lines never appeared. **Verify this in PR 4 under Docker on
   Linux** and do not describe it as working until then.
+
+- **Capacity cannot be changed after an event is created.** `PUT /events/:id`
+  ignores it. Lowering it safely means one conditional update whose filter
+  requires the new value to be at least the current participant count (the same
+  `$expr` shape as `addParticipant`), answering 409 otherwise. Deferred to keep
+  PR 3 to its stated scope.
 
 - **14 repetitions of `return res.status(N).json({ success: false, message })`.**
   A `fail(res, status, message)` helper was proposed and deferred to keep PR 0's

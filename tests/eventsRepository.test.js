@@ -14,11 +14,13 @@ const conference = {
   title: "Tech Conference",
   description: "A virtual tech conference.",
   startsAt: new Date("2099-12-01T10:00:00Z"),
+  capacity: 10,
   organizerId: "organizer-1",
   organizerName: "Jane Smith",
 };
 
 const john = { userId: "user-1", name: "John Doe", email: "john@example.com" };
+const jane = { userId: "user-2", name: "Jane Roe", email: "jane@example.com" };
 
 describe("eventsRepository", () => {
   it("returns a domain object: public ids, no _id", async () => {
@@ -29,6 +31,7 @@ describe("eventsRepository", () => {
       title: conference.title,
       description: conference.description,
       startsAt: conference.startsAt,
+      capacity: 10,
       organizerId: "organizer-1",
       organizerName: "Jane Smith",
       participants: [],
@@ -175,8 +178,12 @@ describe("eventsRepository", () => {
   describe("registration", () => {
     it("adds a participant and returns the updated event", async () => {
       const event = await events.create(conference);
-      const registered = await events.addParticipant(event.id, john);
+      const { event: registered, created } = await events.addParticipant(
+        event.id,
+        john,
+      );
 
+      expect(created).toBe(true);
       expect(registered.participants).toEqual([
         { ...john, registeredAt: expect.any(Date) },
       ]);
@@ -186,33 +193,104 @@ describe("eventsRepository", () => {
       expect(await events.addParticipant("no-such-id", john)).toBeNull();
     });
 
-    it("rejects a second registration with AlreadyRegisteredError", async () => {
+    // Idempotent: the retry of a request whose response was lost gets the
+    // original registration back, and nothing is written a second time.
+    it("treats a repeat registration as success, without adding anyone", async () => {
       const event = await events.create(conference);
-      await events.addParticipant(event.id, john);
+      const first = await events.addParticipant(event.id, john);
+      const again = await events.addParticipant(event.id, john);
 
-      await expect(
-        events.addParticipant(event.id, john),
-      ).rejects.toBeInstanceOf(events.AlreadyRegisteredError);
+      expect(again.created).toBe(false);
+      expect(again.event.participants).toHaveLength(1);
+      expect(again.event.participants[0].registeredAt).toEqual(
+        first.event.participants[0].registeredAt,
+      );
     });
 
     // The race the old read-check-push code had: every request saw "not
     // registered yet" and every one pushed. With the check inside the update's
-    // filter, exactly one of a concurrent burst can win.
-    it("lets exactly one of several concurrent duplicate registrations succeed", async () => {
+    // filter, exactly one of a concurrent burst can write. The others are still
+    // successes, because the user did end up registered.
+    it("writes exactly once for several concurrent duplicate registrations", async () => {
       const event = await events.create(conference);
 
-      const results = await Promise.allSettled(
+      const results = await Promise.all(
         Array.from({ length: 5 }, () => events.addParticipant(event.id, john)),
+      );
+
+      expect(results.filter((r) => r.created)).toHaveLength(1);
+      expect((await events.findById(event.id)).participants).toHaveLength(1);
+    });
+
+    it("rejects a new participant with EventFullError when there is no place", async () => {
+      const event = await events.create({ ...conference, capacity: 1 });
+      await events.addParticipant(event.id, john);
+
+      await expect(
+        events.addParticipant(event.id, jane),
+      ).rejects.toBeInstanceOf(events.EventFullError);
+      expect((await events.findById(event.id)).participants).toHaveLength(1);
+    });
+
+    // Order of the checks after a failed update: "already registered" must win
+    // over "full", or the retry of the registration that took the last place
+    // would be told the event is full.
+    it("still treats a repeat as success once the event is full", async () => {
+      const event = await events.create({ ...conference, capacity: 1 });
+      await events.addParticipant(event.id, john);
+
+      const again = await events.addParticipant(event.id, john);
+      expect(again.created).toBe(false);
+    });
+
+    // The test this PR exists for. Twenty different users race for five places.
+    // Read-check-write lets every request see a free place before any of them
+    // pushes, so it would overbook. The conditional update must let in exactly
+    // five, however the requests interleave.
+    it("never overbooks under concurrent registrations by different users", async () => {
+      const capacity = 5;
+      const event = await events.create({ ...conference, capacity });
+      const people = Array.from({ length: 20 }, (_, i) => ({
+        userId: `user-${i}`,
+        name: `User ${i}`,
+        email: `user${i}@example.com`,
+      }));
+
+      const results = await Promise.allSettled(
+        people.map((p) => events.addParticipant(event.id, p)),
       );
 
       const won = results.filter((r) => r.status === "fulfilled");
       const lost = results.filter((r) => r.status === "rejected");
-      expect(won).toHaveLength(1);
-      expect(lost).toHaveLength(4);
+      expect(won).toHaveLength(capacity);
+      for (const r of won) expect(r.value.created).toBe(true);
+      expect(lost).toHaveLength(people.length - capacity);
       for (const r of lost) {
-        expect(r.reason).toBeInstanceOf(events.AlreadyRegisteredError);
+        expect(r.reason).toBeInstanceOf(events.EventFullError);
       }
-      expect((await events.findById(event.id)).participants).toHaveLength(1);
+      expect((await events.findById(event.id)).participants).toHaveLength(
+        capacity,
+      );
+    });
+
+    // Fails closed: an event with no recorded limit takes nobody, rather than
+    // everybody. Inserted directly, because create() can no longer make one.
+    it("treats an event stored without a capacity as full", async () => {
+      await db.getDb().collection("events").insertOne({
+        uuid: "legacy-1",
+        title: "Legacy",
+        description: "-",
+        startsAt: conference.startsAt,
+        organizerUuid: "organizer-1",
+        organizerName: "Jane Smith",
+        participants: [],
+        createdAt: new Date(),
+        updatedAt: new Date(),
+      });
+
+      await expect(
+        events.addParticipant("legacy-1", john),
+      ).rejects.toBeInstanceOf(events.EventFullError);
     });
 
     it("removes a participant, and reports when there was nothing to remove", async () => {

@@ -65,8 +65,8 @@ const INDEXES = {
     //
     // Uniqueness of a user WITHIN one event's array is a different rule, and a
     // unique multikey index would not express it (it enforces uniqueness across
-    // documents, not within one). That rule is enforced by PR 3's conditional
-    // update.
+    // documents, not within one). That rule is enforced by the conditional
+    // update in eventsRepository.addParticipant.
     {
       key: { "participants.userUuid": 1 },
       name: "events_participants_userUuid",

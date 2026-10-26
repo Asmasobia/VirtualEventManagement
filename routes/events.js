@@ -26,6 +26,25 @@ const checkStartsAt = (value) => {
   return { startsAt };
 };
 
+// The upper bound is what keeps "registrations embedded in the event" safe
+// (see CLAUDE.md). A MongoDB document cannot exceed 16 MB, and the participant
+// list lives inside the event document. At roughly 150 bytes per participant,
+// 10,000 places is about 1.5 MB, comfortably under the ceiling. An event that
+// genuinely needed more would need registrations in their own collection.
+const MAX_CAPACITY = 10_000;
+
+// Validate a client-supplied `capacity`. Same shape as checkStartsAt. A JSON
+// number only: "50" as a string is rejected rather than coerced, and so are
+// 2.5, 0 and negatives, because none of them is a number of places.
+const checkCapacity = (value) => {
+  if (!Number.isInteger(value) || value < 1 || value > MAX_CAPACITY) {
+    return {
+      error: `capacity must be a whole number from 1 to ${MAX_CAPACITY}.`,
+    };
+  }
+  return { capacity: value };
+};
+
 // ─────────────────────────────────────────────
 //  HELPER: Simplified event response
 // ─────────────────────────────────────────────
@@ -35,6 +54,7 @@ const formatEvent = (event) => ({
   description: event.description,
   startsAt: event.startsAt,
   organizerName: event.organizerName,
+  capacity: event.capacity,
   participantCount: event.participants.length,
 });
 
@@ -94,7 +114,7 @@ router.get("/:id", async (req, res) => {
 // ─────────────────────────────────────────────
 router.post("/", authenticate, requireOrganizer, async (req, res) => {
   try {
-    const { title, description, startsAt: rawStartsAt } = req.body;
+    const { title, description, startsAt: rawStartsAt, capacity } = req.body;
 
     // Removed: console.log of req.user and req.body.
     //
@@ -111,10 +131,10 @@ router.post("/", authenticate, requireOrganizer, async (req, res) => {
     // If a log line is worth keeping, it gets IDs, not payloads — `userId` and
     // `eventId` let you reconstruct what happened from the database, without the
     // log itself becoming a copy of the data.
-    if (!title || !description || !rawStartsAt) {
+    if (!title || !description || !rawStartsAt || capacity === undefined) {
       return res.status(400).json({
         success: false,
-        message: "Title, description, and startsAt are required.",
+        message: "Title, description, startsAt, and capacity are required.",
       });
     }
 
@@ -123,10 +143,18 @@ router.post("/", authenticate, requireOrganizer, async (req, res) => {
       return res.status(400).json({ success: false, message: checked.error });
     }
 
+    const checkedCapacity = checkCapacity(capacity);
+    if (checkedCapacity.error) {
+      return res
+        .status(400)
+        .json({ success: false, message: checkedCapacity.error });
+    }
+
     const newEvent = await events.create({
       title: title.trim(),
       description: description.trim(),
       startsAt: checked.startsAt,
+      capacity: checkedCapacity.capacity,
       organizerId: req.user.id,
       organizerName: req.user.name,
     });
@@ -290,42 +318,52 @@ router.post("/:id/register", authenticate, async (req, res) => {
     // by the index on `events.participants.userUuid` — derived, not stored,
     // so it cannot drift.
     //
-    // There is no "already registered?" check here. That check used to read the
-    // array, test it, then push, and two concurrent requests could both pass it.
-    // The repository does the check and the push as one atomic update, and
-    // reports a duplicate as AlreadyRegisteredError.
-    let registered;
+    // There is no "already registered?" or "is it full?" check here. Checking
+    // here would mean reading the event, testing it, then writing, and any
+    // number of concurrent requests could pass the test before any of them
+    // wrote. The repository enforces both rules in one atomic update.
+    //
+    // A repeat registration is not an error (see addParticipant). It answers
+    // 200 with the original registration, so a client that retries after a
+    // lost response gets the same answer as the first time.
+    let result;
     try {
-      registered = await events.addParticipant(event.id, {
+      result = await events.addParticipant(event.id, {
         userId: req.user.id,
         name: req.user.name,
         email: req.user.email,
       });
     } catch (err) {
-      if (err instanceof events.AlreadyRegisteredError) {
+      if (err instanceof events.EventFullError) {
         return res.status(409).json({ success: false, message: err.message });
       }
       throw err;
     }
 
     // The event was deleted between the read above and the update.
-    if (!registered) {
+    if (!result) {
       return res
         .status(404)
         .json({ success: false, message: "Event not found." });
     }
 
+    const { event: registered, created } = result;
     const participant = registered.participants.find(
       (p) => p.userId === req.user.id,
     );
 
+    // Only when this request did the registering. A retry must not send a
+    // second confirmation for the same registration.
+    //
     // `req.user` was read from the users collection by `authenticate`, so it is
     // the system of record's view of the recipient, not a token's copy. Not
     // awaited: a slow SMTP server must not delay the response, and the `.catch()`
     // is what stops a failed send becoming an unhandledRejection (invariant 7).
-    sendEventRegistrationEmail(req.user, registered).catch((err) =>
-      console.error("Confirmation email error:", err.message),
-    );
+    if (created) {
+      sendEventRegistrationEmail(req.user, registered).catch((err) =>
+        console.error("Confirmation email error:", err.message),
+      );
+    }
 
     return res.status(200).json({
       success: true,

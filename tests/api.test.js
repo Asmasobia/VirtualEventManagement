@@ -15,6 +15,7 @@ jest.mock("../services/emailService", () => ({
   sendEventRegistrationEmail: jest.fn().mockResolvedValue(undefined),
   sendEventUpdateEmail: jest.fn().mockResolvedValue(undefined),
 }));
+const { sendEventRegistrationEmail } = require("../services/emailService");
 
 // ─────────────────────────────────────────────
 //  Increase timeout for async tests
@@ -49,6 +50,7 @@ const eventData = {
   title: "Tech Conference 2025",
   description: "A virtual tech conference.",
   startsAt: "2099-12-01T10:00:00Z",
+  capacity: 50,
 };
 
 // ─────────────────────────────────────────────
@@ -385,6 +387,7 @@ describe("POST /events", () => {
     expect(res.body.event.organizerName).toBe(organizer.name);
     // One UTC instant, serialised as ISO-8601. The old date/time pair is gone.
     expect(res.body.event.startsAt).toBe("2099-12-01T10:00:00.000Z");
+    expect(res.body.event.capacity).toBe(50);
     expect(res.body.event).not.toHaveProperty("date");
     expect(res.body.event).not.toHaveProperty("time");
   });
@@ -460,6 +463,58 @@ describe("POST /events", () => {
 
     expect(res.statusCode).toBe(400);
     expect(res.body.message).toMatch(/startsAt/);
+  });
+
+  // Capacity is required, not defaulted. An event with no limit would make the
+  // embedded participant list unbounded, which is the one thing the embedded
+  // design cannot afford.
+  test("should fail without a capacity", async () => {
+    const token = await registerAndLogin(organizer);
+    const { capacity: _omitted, ...withoutCapacity } = eventData;
+
+    const res = await request(app)
+      .post("/events")
+      .set("Authorization", `Bearer ${token}`)
+      .send(withoutCapacity);
+
+    expect(res.statusCode).toBe(400);
+    expect(res.body.message).toMatch(/capacity/);
+  });
+
+  test.each([
+    ["zero", 0],
+    ["a negative number", -5],
+    ["a fraction", 2.5],
+    ["a numeric string", "50"],
+    ["more than the maximum", 10_001],
+    ["null", null],
+  ])("should fail with a capacity of %s", async (_label, capacity) => {
+    const token = await registerAndLogin(organizer);
+
+    const res = await request(app)
+      .post("/events")
+      .set("Authorization", `Bearer ${token}`)
+      .send({ ...eventData, capacity });
+
+    expect(res.statusCode).toBe(400);
+    expect(res.body.message).toMatch(/capacity/);
+  });
+
+  test("should ignore capacity on update", async () => {
+    const token = await registerAndLogin(organizer);
+
+    const created = await request(app)
+      .post("/events")
+      .set("Authorization", `Bearer ${token}`)
+      .send(eventData);
+
+    const res = await request(app)
+      .put(`/events/${created.body.event.id}`)
+      .set("Authorization", `Bearer ${token}`)
+      .send({ capacity: 1 });
+
+    expect(res.statusCode).toBe(200);
+    expect(res.body.event.capacity).toBe(eventData.capacity);
   });
 
   test("should reject the old date and time fields", async () => {
@@ -746,7 +801,10 @@ describe("POST /events/:id/register", () => {
     expect(res.body.registration.eventId).toBe(eventId);
   });
 
-  test("should fail if attendee registers twice", async () => {
+  // Idempotent: the second request is what a client sends when the response to
+  // the first was lost. It must get the same answer, not a 409 for something
+  // that worked, and the attendee must not get a second confirmation email.
+  test("should return the existing registration if attendee registers twice", async () => {
     const organizerToken = await registerAndLogin(organizer);
     const attendeeToken = await registerAndLogin(attendee);
 
@@ -756,8 +814,9 @@ describe("POST /events/:id/register", () => {
       .send(eventData);
 
     const eventId = created.body.event.id;
+    sendEventRegistrationEmail.mockClear();
 
-    await request(app)
+    const first = await request(app)
       .post(`/events/${eventId}/register`)
       .set("Authorization", `Bearer ${attendeeToken}`);
 
@@ -765,8 +824,40 @@ describe("POST /events/:id/register", () => {
       .post(`/events/${eventId}/register`)
       .set("Authorization", `Bearer ${attendeeToken}`);
 
+    expect(res.statusCode).toBe(200);
+    expect(res.body).toEqual(first.body);
+    expect(sendEventRegistrationEmail).toHaveBeenCalledTimes(1);
+
+    const after = await request(app).get(`/events/${eventId}`);
+    expect(after.body.event.participantCount).toBe(1);
+  });
+
+  test("should fail with 409 when the event is full", async () => {
+    const organizerToken = await registerAndLogin(organizer);
+    const firstToken = await registerAndLogin(attendee);
+    const secondToken = await registerAndLogin({
+      ...attendee,
+      email: "second@example.com",
+    });
+
+    const created = await request(app)
+      .post("/events")
+      .set("Authorization", `Bearer ${organizerToken}`)
+      .send({ ...eventData, capacity: 1 });
+
+    const eventId = created.body.event.id;
+
+    await request(app)
+      .post(`/events/${eventId}/register`)
+      .set("Authorization", `Bearer ${firstToken}`);
+
+    const res = await request(app)
+      .post(`/events/${eventId}/register`)
+      .set("Authorization", `Bearer ${secondToken}`);
+
     expect(res.statusCode).toBe(409);
     expect(res.body.success).toBe(false);
+    expect(res.body.message).toMatch(/full/);
   });
 
   test("should fail if organizer tries to register for event", async () => {
@@ -801,6 +892,61 @@ describe("POST /events/:id/register", () => {
 
     expect(res.statusCode).toBe(401);
     expect(res.body.success).toBe(false);
+  });
+
+  // The PR 3 acceptance test, end to end: concurrent requests through the real
+  // middleware and the real database, at an event with capacity N. Exactly N
+  // must succeed. The repository test proves the same thing about the update
+  // itself. This one proves no layer above it reintroduces a read-then-write,
+  // for example a route that checks the participant count before calling the
+  // repository.
+  //
+  // Each attendee is a real user, because authenticate looks every token's user
+  // up (invariant 8). They are seeded through the repository rather than
+  // POST /register, because twenty bcrypt hashes would take most of the test's
+  // time limit and are not what is under test.
+  test("should never overbook under concurrent registrations", async () => {
+    const capacity = 5;
+    const organizerToken = await registerAndLogin(organizer);
+
+    const created = await request(app)
+      .post("/events")
+      .set("Authorization", `Bearer ${organizerToken}`)
+      .send({ ...eventData, capacity });
+
+    const eventId = created.body.event.id;
+
+    const tokens = await Promise.all(
+      Array.from({ length: 20 }, async (_, i) => {
+        const user = await users.create({
+          name: `Attendee ${i}`,
+          email: `attendee${i}@example.com`,
+          passwordHash: "not-a-real-hash",
+          role: "attendee",
+        });
+        return jwt.sign(
+          { sub: user.id, ver: users.INITIAL_TOKEN_VERSION },
+          config.jwt.secret,
+        );
+      }),
+    );
+
+    const responses = await Promise.all(
+      tokens.map((token) =>
+        request(app)
+          .post(`/events/${eventId}/register`)
+          .set("Authorization", `Bearer ${token}`),
+      ),
+    );
+
+    const statuses = responses.map((r) => r.statusCode);
+    expect(statuses.filter((s) => s === 200)).toHaveLength(capacity);
+    expect(statuses.filter((s) => s === 409)).toHaveLength(
+      tokens.length - capacity,
+    );
+
+    const after = await request(app).get(`/events/${eventId}`);
+    expect(after.body.event.participantCount).toBe(capacity);
   });
 });
 
