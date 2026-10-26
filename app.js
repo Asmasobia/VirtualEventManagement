@@ -36,6 +36,7 @@ const express = require("express");
 // below are evaluated, config is known-good — or the process has already exited.
 const config = require("./config/env");
 
+const db = require("./db/client");
 const authRoutes = require("./routes/auth");
 const eventRoutes = require("./routes/events");
 
@@ -96,14 +97,38 @@ app.use("/events", eventRoutes); // GET/POST /events, PUT/DELETE /events/:id, ..
 // database blip into a rolling outage of the whole deployment.
 //
 // The dependency-checking endpoint is a READINESS probe, and it is a different
-// URL with different semantics ("should I be sent traffic right now"). That one
-// arrives with the database, in PR 1.
+// URL with different semantics ("should I be sent traffic right now"): /ready,
+// directly below.
 app.get("/health", (req, res) => {
   res.status(200).json({
     success: true,
     message: "Virtual Event Platform API is running.",
     timestamp: new Date().toISOString(),
   });
+});
+
+// ─── Readiness check ─────────────────────────────────────────────────────────
+// The counterpart to /health, and the only probe allowed to touch the database.
+// A failing ping answers 503 "not ready", which makes the orchestrator stop
+// routing traffic here — it does NOT restart the process. Wiring this URL to a
+// liveness probe would undo that distinction and bring back the rolling-outage
+// problem described above.
+//
+// 503 rather than 500: the server is working correctly and is telling the caller
+// that a dependency is unavailable right now, which is what 503 means and what
+// load balancers expect from a probe. The body says only "not ready" — the driver
+// error can contain the host and, on some failures, connection-string fragments,
+// so it goes to the server log (name and message only) and never to the caller.
+app.get("/ready", async (req, res) => {
+  try {
+    await db.ping();
+    return res.status(200).json({ success: true, message: "Ready." });
+  } catch (err) {
+    if (!config.isTest) {
+      console.error(`Readiness check failed: ${err.name}: ${err.message}`);
+    }
+    return res.status(503).json({ success: false, message: "Not ready." });
+  }
 });
 
 // ─── 404 for anything unmatched ──────────────────────────────────────────────

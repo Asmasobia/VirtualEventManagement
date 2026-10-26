@@ -8,23 +8,62 @@
 
 const app = require("./app");
 const config = require("./config/env");
+const db = require("./db/client");
 
-const server = app.listen(config.PORT, () => {
-  console.log(`🚀 Server running on http://localhost:${config.PORT}`);
-  console.log(`📋 Health check: http://localhost:${config.PORT}/health`);
-  console.log(`🔧 Environment: ${config.env}`);
+// ─── Startup order: database FIRST, then the socket ──────────────────────────
+//
+//  The database is connected before the port opens, never after. If it were the
+//  other way round, there would be a window where the process accepts requests it
+//  cannot serve, and a load balancer or Kubernetes Service would send real users
+//  into it. With this order, "the port is open" implies "the database was
+//  reachable and the indexes exist" — the process has no half-started state.
+//
+//  If the connection fails, we exit non-zero rather than retry forever or start
+//  without it. Same argument as config/env.js: a crash-looping container never
+//  receives traffic and is loudly visible; a running-but-broken one serves errors.
+//
+//  The error is logged by name and message only. The connection string is a
+//  credential for hosted clusters, and the one thing never to do with it is print
+//  it — logs outlive the process.
+let server;
 
-  // Say out loud whether an optional feature is on. The old code could not do
-  // this, because "email misconfigured" and "email deliberately off" looked
-  // identical — both produced silence, and the failure only appeared as a
-  // console.error inside a swallowed catch, long after startup.
-  if (config.email.enabled) {
-    console.log(`📧 Email enabled (from: ${config.email.from})`);
-  } else {
-    console.log(
-      "📭 Email disabled — no EMAIL_HOST or EMAIL_SERVICE configured.",
-    );
-  }
+async function start() {
+  await db.connect();
+  console.log("🗄️  MongoDB connected, indexes ensured.");
+
+  server = app.listen(config.PORT, () => {
+    console.log(`🚀 Server running on http://localhost:${config.PORT}`);
+    console.log(`📋 Health check: http://localhost:${config.PORT}/health`);
+    console.log(`🔧 Environment: ${config.env}`);
+
+    // Say out loud whether an optional feature is on. The old code could not do
+    // this, because "email misconfigured" and "email deliberately off" looked
+    // identical — both produced silence, and the failure only appeared as a
+    // console.error inside a swallowed catch, long after startup.
+    if (config.email.enabled) {
+      console.log(`📧 Email enabled (from: ${config.email.from})`);
+    } else {
+      console.log(
+        "📭 Email disabled — no EMAIL_HOST or EMAIL_SERVICE configured.",
+      );
+    }
+  });
+
+  // Registered only once there is something to shut down. A signal that arrives
+  // during the connect above gets Node's default behaviour — immediate exit —
+  // which is correct: no request has been accepted, so there is nothing to drain.
+  process.on("SIGTERM", () => shutdown("SIGTERM"));
+  process.on("SIGINT", () => shutdown("SIGINT"));
+}
+
+// Invariant 7: this promise is deliberately not awaited, so it needs its own
+// handler. Without it a failed connect would surface as an unhandledRejection —
+// still an exit, but with a generic message instead of "the database is down".
+start().catch((err) => {
+  console.error(
+    `Failed to start: ${err.name}: ${err.message}. Is MongoDB running and MONGODB_URI correct?`,
+  );
+  process.exit(1);
 });
 
 // ─── Graceful shutdown ───────────────────────────────────────────────────────
@@ -82,13 +121,22 @@ function shutdown(signal) {
       console.error("Error during shutdown:", err);
       process.exit(1);
     }
-    console.log("✅ All connections closed. Goodbye.");
-    process.exit(0);
+    console.log("✅ HTTP connections drained.");
+
+    // The database closes AFTER the drain, never before: a request still in
+    // flight may be mid-query, and closing the pool under it turns a request that
+    // was about to succeed into a 500. Order is the reverse of startup.
+    db.close()
+      .then(() => {
+        console.log("✅ MongoDB connection closed. Goodbye.");
+        process.exit(0);
+      })
+      .catch((closeErr) => {
+        console.error("Error closing MongoDB:", closeErr);
+        process.exit(1);
+      });
   });
 }
-
-process.on("SIGTERM", () => shutdown("SIGTERM"));
-process.on("SIGINT", () => shutdown("SIGINT"));
 
 // ─── Last-resort handlers ────────────────────────────────────────────────────
 //

@@ -45,7 +45,7 @@ machine, say so explicitly and label it unverified — never round it up to "don
 ```bash
 npm run lint          # eslint . — prints nothing on success
 npm run format:check  # prettier --check .
-npm test              # jest — 39 tests currently passing
+npm test              # jest — 99 tests currently passing
 ```
 
 `npm run format` writes; `format:check` only verifies. CI uses `check`, because a CI
@@ -243,12 +243,6 @@ Documented rather than hidden. Do not "fix" these out of order; each has a PR.
   Remember a JWT is signed, not encrypted, and proves a claim was signed in the past,
   not that it is still true. Anything mutable (role, account status) must come from
   the system of record.
-
-- **`data/store.js` is an in-memory object.** Seven lines: `{ users: [], events: [] }`.
-  All state dies with the process, and there is no persistence of any kind — not a
-  file, not a JSON document on disk. PR 1 therefore _introduces_ a data layer rather
-  than swapping one out, which is why it carries the repository boundary, the indexes
-  and the readiness probe with it.
 
 - **Email is fire-and-forget.** If the process dies between committing a
   registration and the SMTP call completing, the email is lost with no record that it

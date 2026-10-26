@@ -1,9 +1,8 @@
 const express = require("express");
 const bcrypt = require("bcryptjs");
 const jwt = require("jsonwebtoken");
-const { randomUUID: uuidv4 } = require("crypto");
 const router = express.Router();
-const store = require("../data/store");
+const users = require("../repositories/usersRepository");
 const { authenticate } = require("../middleware/auth");
 const { sendWelcomeEmail } = require("../services/emailService");
 const { isValidEmail, isValidPassword } = require("../utils/validator");
@@ -65,28 +64,25 @@ router.post("/register", async (req, res) => {
       });
     }
 
-    const existingUser = store.users.find(
-      (u) => u.email.toLowerCase() === email.toLowerCase(),
-    );
-    if (existingUser) {
-      return res.status(409).json({
-        success: false,
-        message: "A user with this email already exists.",
-      });
+    // No "does this email exist?" lookup first — that was a check-then-write
+    // race. The insert itself is the check: the unique index rejects a
+    // duplicate atomically, and the repository turns that into EmailTakenError.
+    //
+    // The cost of that ordering: a duplicate registration now pays for a bcrypt
+    // hash (~250 ms at cost 12) before being rejected. Acceptable — it is the
+    // rare path, and a pre-check to skip the hash would only be an
+    // optimisation, never the enforcement.
+    const passwordHash = await bcrypt.hash(password, 12);
+
+    let newUser;
+    try {
+      newUser = await users.create({ name, email, passwordHash, role });
+    } catch (err) {
+      if (err instanceof users.EmailTakenError) {
+        return res.status(409).json({ success: false, message: err.message });
+      }
+      throw err;
     }
-
-    const hashedPassword = await bcrypt.hash(password, 12);
-
-    const newUser = {
-      id: uuidv4(),
-      name: name.trim(),
-      email: email.toLowerCase().trim(),
-      password: hashedPassword,
-      role,
-      createdAt: new Date().toISOString(),
-    };
-
-    store.users.push(newUser);
 
     // Fire-and-forget, deliberately not awaited: a slow or dead SMTP server
     // must not make registration slow or fail. The user's account already
@@ -103,14 +99,13 @@ router.post("/register", async (req, res) => {
 
     const token = issueToken(newUser);
 
-    // Strip the hash before responding. `password: _` renames it out of the
-    // rest object; the underscore is the convention for "deliberately unused".
-    const { password: _hash, ...userResponse } = newUser;
+    // No hash to strip: the repository never returns it outside
+    // findCredentialsByEmail, so `newUser` is safe to send as-is.
     return res.status(201).json({
       success: true,
       message: "Registration successful!",
       token,
-      user: userResponse,
+      user: newUser,
     });
   } catch (error) {
     console.error("Registration error", error);
@@ -134,31 +129,32 @@ router.post("/login", async (req, res) => {
         .json({ success: false, message: "Email and password are required." });
     }
 
-    const user = store.users.find(
-      (u) => u.email.toLowerCase() === email.toLowerCase(),
-    );
+    const credentials = await users.findCredentialsByEmail(email);
 
-    if (!user) {
+    if (!credentials) {
       return res
         .status(401)
         .json({ success: false, message: "Invalid email or password." });
     }
 
-    const isPasswordValid = await bcrypt.compare(password, user.password);
+    const isPasswordValid = await bcrypt.compare(
+      password,
+      credentials.passwordHash,
+    );
     if (!isPasswordValid) {
       return res
         .status(401)
         .json({ success: false, message: "Invalid email or password." });
     }
 
+    const { user } = credentials;
     const token = issueToken(user);
 
-    const { password: _hash, ...userResponse } = user;
     return res.status(200).json({
       success: true,
       message: "Login successful.",
       token,
-      user: userResponse,
+      user,
     });
   } catch (error) {
     console.error("Login error:", error);
@@ -171,19 +167,26 @@ router.post("/login", async (req, res) => {
 // ─────────────────────────────────────────────
 //  GET /profile
 // ─────────────────────────────────────────────
-router.get("/profile", authenticate, (req, res) => {
-  const user = store.users.find((u) => u.id === req.user.id);
+router.get("/profile", authenticate, async (req, res) => {
+  // Now async, so it needs the same try/catch as its siblings. Express 5 would
+  // forward a rejection to the error handler anyway, but that answers with the
+  // generic shape; this keeps /profile's failure response matching /login's.
+  try {
+    const user = await users.findById(req.user.id);
 
-  if (!user) {
-    return res.status(404).json({ success: false, message: "User not found." });
+    if (!user) {
+      return res
+        .status(404)
+        .json({ success: false, message: "User not found." });
+    }
+
+    return res.status(200).json({ success: true, user });
+  } catch (error) {
+    console.error("Profile error:", error);
+    return res
+      .status(500)
+      .json({ success: false, message: "Internal server error." });
   }
-
-  // Same hash-stripping idiom as /register and /login — `_hash` names the
-  // extracted field only so it can be excluded from `userResponse`, and the
-  // leading underscore tells both the reader and the linter that never reading
-  // it is the intent rather than an oversight.
-  const { password: _hash, ...userResponse } = user;
-  return res.status(200).json({ success: true, user: userResponse });
 });
 
 module.exports = router;

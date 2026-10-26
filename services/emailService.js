@@ -133,8 +133,7 @@ async function sendEventRegistrationEmail(user, event) {
       `Hi ${user.name},\n\n` +
       `Your registration has been confirmed for the following event:\n\n` +
       `  Event     : ${event.title}\n` +
-      `  Date      : ${new Date(event.date).toDateString()}\n` +
-      `  Time      : ${event.time}\n` +
+      `  Starts    : ${event.startsAt.toUTCString()}\n` +
       `  Details   : ${event.description}\n` +
       `  Organizer : ${event.organizerName}\n\n` +
       `We look forward to seeing you there!\n\n` +
@@ -164,8 +163,7 @@ async function sendEventUpdateEmail(participants, event) {
           `Hi ${participant.name},\n\n` +
           `An event you registered for has been updated:\n\n` +
           `  Event    : ${event.title}\n` +
-          `  New Date : ${new Date(event.date).toDateString()}\n` +
-          `  New Time : ${event.time}\n` +
+          `  New Start: ${event.startsAt.toUTCString()}\n` +
           `  Details  : ${event.description}\n\n` +
           `Please update your schedule accordingly.\n\n` +
           `- Virtual Event Platform`,

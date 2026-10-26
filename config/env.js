@@ -52,6 +52,9 @@ const isTest = process.env.NODE_ENV === "test";
 const TEST_DEFAULTS = {
   JWT_SECRET: "test-only-secret-not-used-outside-jest",
   JWT_EXPIRES_IN: "1h",
+  // Localhost, no credentials, so safe to publish. Note the KEY: tests read
+  // MONGODB_TEST_URI, never MONGODB_URI — see the Database section below for why.
+  MONGODB_TEST_URI: "mongodb://127.0.0.1:27017/virtual_events_test",
 };
 
 /**
@@ -118,6 +121,72 @@ if (!Number.isInteger(PORT) || PORT < 1 || PORT > 65535) {
   problems.push(
     `PORT must be an integer between 1 and 65535, got "${process.env.PORT}".`,
   );
+}
+
+// ─── Database ────────────────────────────────────────────────────────────────
+// Required, with no non-test fallback: guessing a database host is how a
+// development run ends up writing to the wrong instance.
+//
+// This checks the SHAPE only. Whether the host is reachable is a connection
+// question, answered when the client connects at startup (and by the readiness
+// probe afterwards). What this catches is the cheap, common mistakes — a missing
+// value, a pasted `http://` URL, a copied placeholder, no database name — at the
+// same moment as every other config error, instead of on the first query.
+//
+// A hosted connection string embeds a password, so NONE of the messages below
+// echo the value back. An error line is a log line, and logs outlive the process.
+//
+// ⚠️ TESTS READ A DIFFERENT VARIABLE. The suite drops its database before every
+//    test, so the one thing it must never do is resolve to the development
+//    database. It used to: tests read MONGODB_URI, the test default only applied
+//    when that was unset, and dotenv loads `.env` in tests too — so on any machine
+//    with a real `.env`, the "test" run was pointed at `virtual_events`. Nothing
+//    broke only because nothing dropped anything yet.
+//
+//    A separate variable makes the two impossible to confuse: `.env` can hold the
+//    dev MONGODB_URI and the test run never looks at it. The `_test` suffix rule
+//    below is the second lock — even a deliberately set MONGODB_TEST_URI cannot
+//    aim the suite at a database whose name does not say it is disposable.
+const MONGODB_VAR = isTest ? "MONGODB_TEST_URI" : "MONGODB_URI";
+const MONGODB_URI = read(MONGODB_VAR);
+// Captures the database name: the first path segment after the host, stopping
+// at the query string.
+const MONGODB_DB_PATTERN = /^mongodb(\+srv)?:\/\/[^/\s]+\/([^/?\s]+)/;
+let mongodbDbName;
+if (!MONGODB_URI) {
+  problems.push(
+    `${MONGODB_VAR} is required, e.g. mongodb://127.0.0.1:27017/virtual_events`,
+  );
+} else if (!/^mongodb(\+srv)?:\/\/[^/\s]+/.test(MONGODB_URI)) {
+  problems.push(
+    `${MONGODB_VAR} must start with mongodb:// or mongodb+srv:// followed by a host.`,
+  );
+} else if (MONGODB_URI.includes("replace-me")) {
+  problems.push(
+    `${MONGODB_VAR} is still the placeholder from .env.example. Replace it with a real connection string.`,
+  );
+} else if (!MONGODB_DB_PATTERN.test(MONGODB_URI)) {
+  // The driver would otherwise silently use its default database ("test"), and
+  // the app would work while writing to a database nobody chose.
+  problems.push(
+    `${MONGODB_VAR} must name a database after the host, e.g. .../virtual_events.`,
+  );
+} else {
+  mongodbDbName = MONGODB_URI.match(MONGODB_DB_PATTERN)[2];
+
+  if (isTest && !mongodbDbName.endsWith("_test")) {
+    problems.push(
+      `${MONGODB_VAR} must name a database ending in "_test". The test suite drops its database before every test, so it refuses to run against one whose name does not mark it as disposable.`,
+    );
+  } else if (isTest && process.env.JEST_WORKER_ID) {
+    // One database PER JEST WORKER. Jest runs test files in parallel processes,
+    // and two files sharing one database would drop each other's data mid-test —
+    // a flaky failure that only appears when the timing lines up. The usual
+    // workaround is `--runInBand`, which invariant 1 exists to avoid. A suffix
+    // per worker keeps parallelism and isolation both. Within a worker, files run
+    // one after another, so a single database per worker is enough.
+    mongodbDbName = `${mongodbDbName}_${process.env.JEST_WORKER_ID}`;
+  }
 }
 
 if (problems.length > 0) {
@@ -197,6 +266,14 @@ module.exports = Object.freeze({
   isTest,
   isProduction: process.env.NODE_ENV === "production",
   PORT,
+  mongodb: Object.freeze({
+    uri: MONGODB_URI,
+    // Exported separately rather than left inside the URI, because in tests it
+    // differs from the URI's path (the per-worker suffix). Rewriting the URI
+    // instead would also move the default authSource, which the driver takes
+    // from that same path segment — a hosted test cluster would then fail auth.
+    dbName: mongodbDbName,
+  }),
   jwt: Object.freeze({
     secret: JWT_SECRET,
     expiresIn: JWT_EXPIRES_IN,

@@ -1,6 +1,6 @@
 const request = require("supertest");
 const app = require("../app");
-const store = require("../data/store");
+const { useTestDatabase } = require("./helpers/db");
 
 // ─────────────────────────────────────────────
 //  Mock email service — prevents SMTP errors
@@ -18,12 +18,11 @@ jest.mock("../services/emailService", () => ({
 jest.setTimeout(10000);
 
 // ─────────────────────────────────────────────
-//  Reset store before each test
+//  Fresh state before each test
 // ─────────────────────────────────────────────
-beforeEach(() => {
-  store.users = [];
-  store.events = [];
-});
+// Users and events both live in the real test database, which the harness
+// drops before each test.
+useTestDatabase();
 
 // ─────────────────────────────────────────────
 //  Shared mock data
@@ -45,8 +44,7 @@ const organizer = {
 const eventData = {
   title: "Tech Conference 2025",
   description: "A virtual tech conference.",
-  date: "2026-12-01",
-  time: "10:00 AM",
+  startsAt: "2099-12-01T10:00:00Z",
 };
 
 // ─────────────────────────────────────────────
@@ -225,6 +223,22 @@ describe("POST /events", () => {
     expect(res.body.success).toBe(true);
     expect(res.body.event.title).toBe(eventData.title);
     expect(res.body.event.organizerName).toBe(organizer.name);
+    // One UTC instant, serialised as ISO-8601. The old date/time pair is gone.
+    expect(res.body.event.startsAt).toBe("2099-12-01T10:00:00.000Z");
+    expect(res.body.event).not.toHaveProperty("date");
+    expect(res.body.event).not.toHaveProperty("time");
+  });
+
+  test("should normalise an offset start to the same UTC instant", async () => {
+    const token = await registerAndLogin(organizer);
+
+    const res = await request(app)
+      .post("/events")
+      .set("Authorization", `Bearer ${token}`)
+      .send({ ...eventData, startsAt: "2099-12-01T15:30:00+05:30" });
+
+    expect(res.statusCode).toBe(201);
+    expect(res.body.event.startsAt).toBe("2099-12-01T10:00:00.000Z");
   });
 
   test("should fail if attendee tries to create event", async () => {
@@ -258,16 +272,46 @@ describe("POST /events", () => {
     expect(res.body.success).toBe(false);
   });
 
-  test("should fail with a past date", async () => {
+  test("should fail with a past start", async () => {
     const token = await registerAndLogin(organizer);
 
     const res = await request(app)
       .post("/events")
       .set("Authorization", `Bearer ${token}`)
-      .send({ ...eventData, date: "2020-01-01" });
+      .send({ ...eventData, startsAt: "2020-01-01T10:00:00Z" });
 
     expect(res.statusCode).toBe(400);
     expect(res.body.success).toBe(false);
+  });
+
+  // Each of these is accepted by `new Date(string)`. The 400 is the point.
+  test.each([
+    ["no UTC offset", "2099-12-01T10:00:00"],
+    ["a date with no time", "2099-12-01"],
+    ["a day that does not exist", "2099-02-30T10:00:00Z"],
+    ["a non-string", 4102480800000],
+  ])("should fail with %s", async (_label, startsAt) => {
+    const token = await registerAndLogin(organizer);
+
+    const res = await request(app)
+      .post("/events")
+      .set("Authorization", `Bearer ${token}`)
+      .send({ ...eventData, startsAt });
+
+    expect(res.statusCode).toBe(400);
+    expect(res.body.message).toMatch(/startsAt/);
+  });
+
+  test("should reject the old date and time fields", async () => {
+    const token = await registerAndLogin(organizer);
+    const { startsAt: _omitted, ...rest } = eventData;
+
+    const res = await request(app)
+      .post("/events")
+      .set("Authorization", `Bearer ${token}`)
+      .send({ ...rest, date: "2099-12-01", time: "10:00 AM" });
+
+    expect(res.statusCode).toBe(400);
   });
 });
 
@@ -400,7 +444,7 @@ describe("PUT /events/:id", () => {
     expect(res.body.success).toBe(false);
   });
 
-  test("should fail with a past date on update", async () => {
+  test("should fail with a past start on update", async () => {
     const token = await registerAndLogin(organizer);
 
     const created = await request(app)
@@ -413,10 +457,48 @@ describe("PUT /events/:id", () => {
     const res = await request(app)
       .put(`/events/${eventId}`)
       .set("Authorization", `Bearer ${token}`)
-      .send({ date: "2020-01-01" });
+      .send({ startsAt: "2020-01-01T10:00:00Z" });
 
     expect(res.statusCode).toBe(400);
     expect(res.body.success).toBe(false);
+  });
+
+  test("should reject a malformed start on update, and change nothing", async () => {
+    const token = await registerAndLogin(organizer);
+
+    const created = await request(app)
+      .post("/events")
+      .set("Authorization", `Bearer ${token}`)
+      .send(eventData);
+
+    const eventId = created.body.event.id;
+
+    const res = await request(app)
+      .put(`/events/${eventId}`)
+      .set("Authorization", `Bearer ${token}`)
+      .send({ startsAt: "2099-12-01T10:00:00" });
+
+    expect(res.statusCode).toBe(400);
+
+    const after = await request(app).get(`/events/${eventId}`);
+    expect(after.body.event.startsAt).toBe("2099-12-01T10:00:00.000Z");
+  });
+
+  test("should update the start", async () => {
+    const token = await registerAndLogin(organizer);
+
+    const created = await request(app)
+      .post("/events")
+      .set("Authorization", `Bearer ${token}`)
+      .send(eventData);
+
+    const res = await request(app)
+      .put(`/events/${created.body.event.id}`)
+      .set("Authorization", `Bearer ${token}`)
+      .send({ startsAt: "2099-12-02T09:00:00Z" });
+
+    expect(res.statusCode).toBe(200);
+    expect(res.body.event.startsAt).toBe("2099-12-02T09:00:00.000Z");
   });
 });
 

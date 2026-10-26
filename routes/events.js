@@ -1,13 +1,31 @@
 const express = require("express");
-const { randomUUID: uuidv4 } = require("crypto");
 const router = express.Router();
-const store = require("../data/store");
+const events = require("../repositories/eventsRepository");
+const users = require("../repositories/usersRepository");
 const { authenticate, requireOrganizer } = require("../middleware/auth");
 const {
   sendEventRegistrationEmail,
   sendEventUpdateEmail,
 } = require("../services/emailService");
-const { isFutureDate } = require("../utils/validator");
+const { parseStartsAt } = require("../utils/validator");
+
+// Validate a client-supplied `startsAt`. Returns { startsAt } on success or
+// { error } with the message to send as a 400. One place, so create and update
+// cannot drift apart on what counts as a valid start.
+const checkStartsAt = (value) => {
+  const startsAt = parseStartsAt(value);
+  if (!startsAt) {
+    return {
+      error:
+        "startsAt must be an ISO 8601 date-time with a UTC offset, " +
+        'e.g. "2026-12-01T10:00:00Z".',
+    };
+  }
+  if (startsAt <= new Date()) {
+    return { error: "Event start must be in the future." };
+  }
+  return { startsAt };
+};
 
 // ─────────────────────────────────────────────
 //  HELPER: Simplified event response
@@ -16,8 +34,7 @@ const formatEvent = (event) => ({
   id: event.id,
   title: event.title,
   description: event.description,
-  date: event.date,
-  time: event.time,
+  startsAt: event.startsAt,
   organizerName: event.organizerName,
   participantCount: event.participants.length,
 });
@@ -25,34 +42,20 @@ const formatEvent = (event) => ({
 // ─────────────────────────────────────────────
 //  GET /events  – List all events
 // ─────────────────────────────────────────────
-router.get("/", (req, res) => {
+router.get("/", async (req, res) => {
   try {
-    let events = [...store.events];
     const { upcoming, organizerId, search } = req.query;
 
-    if (upcoming === "true") {
-      events = events.filter((e) => new Date(e.date) > new Date());
-    }
-
-    if (organizerId) {
-      events = events.filter((e) => e.organizerId === organizerId);
-    }
-
-    if (search) {
-      const keyword = search.toLowerCase();
-      events = events.filter(
-        (e) =>
-          e.title.toLowerCase().includes(keyword) ||
-          e.description.toLowerCase().includes(keyword),
-      );
-    }
-
-    events.sort((a, b) => new Date(a.date) - new Date(b.date));
+    const found = await events.list({
+      upcoming: upcoming === "true",
+      organizerId,
+      search,
+    });
 
     return res.status(200).json({
       success: true,
-      count: events.length,
-      events: events.map(formatEvent),
+      count: found.length,
+      events: found.map(formatEvent),
     });
   } catch (error) {
     console.error("Get events error:", error);
@@ -65,9 +68,9 @@ router.get("/", (req, res) => {
 // ─────────────────────────────────────────────
 //  GET /events/:id  – Get single event
 // ─────────────────────────────────────────────
-router.get("/:id", (req, res) => {
+router.get("/:id", async (req, res) => {
   try {
-    const event = store.events.find((e) => e.id === req.params.id);
+    const event = await events.findById(req.params.id);
 
     if (!event) {
       return res
@@ -90,9 +93,9 @@ router.get("/:id", (req, res) => {
 // ─────────────────────────────────────────────
 //  POST /events  – Create event (organizer only)
 // ─────────────────────────────────────────────
-router.post("/", authenticate, requireOrganizer, (req, res) => {
+router.post("/", authenticate, requireOrganizer, async (req, res) => {
   try {
-    const { title, description, date, time } = req.body;
+    const { title, description, startsAt: rawStartsAt } = req.body;
 
     // Removed: console.log of req.user and req.body.
     //
@@ -109,34 +112,25 @@ router.post("/", authenticate, requireOrganizer, (req, res) => {
     // If a log line is worth keeping, it gets IDs, not payloads — `userId` and
     // `eventId` let you reconstruct what happened from the database, without the
     // log itself becoming a copy of the data.
-    if (!title || !description || !date || !time) {
+    if (!title || !description || !rawStartsAt) {
       return res.status(400).json({
         success: false,
-        message: "Title, description, date, and time are required.",
+        message: "Title, description, and startsAt are required.",
       });
     }
 
-    if (!isFutureDate(date)) {
-      return res.status(400).json({
-        success: false,
-        message: "Event date must be in the future.",
-      });
+    const checked = checkStartsAt(rawStartsAt);
+    if (checked.error) {
+      return res.status(400).json({ success: false, message: checked.error });
     }
 
-    const newEvent = {
-      id: uuidv4(),
+    const newEvent = await events.create({
       title: title.trim(),
       description: description.trim(),
-      date,
-      time,
+      startsAt: checked.startsAt,
       organizerId: req.user.id,
       organizerName: req.user.name,
-      participants: [],
-      createdAt: new Date().toISOString(),
-      updatedAt: new Date().toISOString(),
-    };
-
-    store.events.push(newEvent);
+    });
 
     return res.status(201).json({
       success: true,
@@ -156,15 +150,13 @@ router.post("/", authenticate, requireOrganizer, (req, res) => {
 // ─────────────────────────────────────────────
 router.put("/:id", authenticate, requireOrganizer, async (req, res) => {
   try {
-    const eventIndex = store.events.findIndex((e) => e.id === req.params.id);
+    const event = await events.findById(req.params.id);
 
-    if (eventIndex === -1) {
+    if (!event) {
       return res
         .status(404)
         .json({ success: false, message: "Event not found." });
     }
-
-    const event = store.events[eventIndex];
 
     if (event.organizerId !== req.user.id) {
       return res.status(403).json({
@@ -173,26 +165,37 @@ router.put("/:id", authenticate, requireOrganizer, async (req, res) => {
       });
     }
 
-    const { title, description, date, time } = req.body;
+    const { title, description, startsAt: rawStartsAt } = req.body;
 
-    if (date && !isFutureDate(date)) {
-      return res.status(400).json({
-        success: false,
-        message: "Event date must be in the future.",
-      });
+    // Present-but-invalid is a 400, same as on create. Absent or empty keeps the
+    // current value, as it did before.
+    let startsAt;
+    if (rawStartsAt) {
+      const checked = checkStartsAt(rawStartsAt);
+      if (checked.error) {
+        return res.status(400).json({ success: false, message: checked.error });
+      }
+      startsAt = checked.startsAt;
     }
 
-    const updatedEvent = {
-      ...event,
-      title: title ? title.trim() : event.title,
-      description: description ? description.trim() : event.description,
-      date: date || event.date,
-      time: time || event.time,
-      updatedAt: new Date().toISOString(),
-    };
+    // Only the fields that were sent. An empty value keeps the current one, as
+    // it did before. The repository `$set`s just these, so this cannot overwrite
+    // a registration that arrived after the read above.
+    const updatedEvent = await events.update(event.id, {
+      title: title ? title.trim() : undefined,
+      description: description ? description.trim() : undefined,
+      startsAt,
+    });
 
-    store.events[eventIndex] = updatedEvent;
+    // The event was deleted between the read and the write.
+    if (!updatedEvent) {
+      return res
+        .status(404)
+        .json({ success: false, message: "Event not found." });
+    }
 
+    // The participant list comes from the post-update document, so whoever was
+    // registered when the write landed is who gets notified.
     if (updatedEvent.participants.length > 0) {
       sendEventUpdateEmail(updatedEvent.participants, updatedEvent).catch(
         (err) => console.error("Update notification error:", err.message),
@@ -215,17 +218,15 @@ router.put("/:id", authenticate, requireOrganizer, async (req, res) => {
 // ─────────────────────────────────────────────
 //  DELETE /events/:id  – Delete event (organizer only)
 // ─────────────────────────────────────────────
-router.delete("/:id", authenticate, requireOrganizer, (req, res) => {
+router.delete("/:id", authenticate, requireOrganizer, async (req, res) => {
   try {
-    const eventIndex = store.events.findIndex((e) => e.id === req.params.id);
+    const event = await events.findById(req.params.id);
 
-    if (eventIndex === -1) {
+    if (!event) {
       return res
         .status(404)
         .json({ success: false, message: "Event not found." });
     }
-
-    const event = store.events[eventIndex];
 
     if (event.organizerId !== req.user.id) {
       return res.status(403).json({
@@ -236,7 +237,7 @@ router.delete("/:id", authenticate, requireOrganizer, (req, res) => {
 
     // Registrations live inside the event, so deleting the event deletes them.
     // There is no second copy on the users to sweep — see POST /:id/register.
-    store.events.splice(eventIndex, 1);
+    await events.remove(event.id);
 
     return res.status(200).json({
       success: true,
@@ -255,15 +256,13 @@ router.delete("/:id", authenticate, requireOrganizer, (req, res) => {
 // ─────────────────────────────────────────────
 router.post("/:id/register", authenticate, async (req, res) => {
   try {
-    const eventIndex = store.events.findIndex((e) => e.id === req.params.id);
+    const event = await events.findById(req.params.id);
 
-    if (eventIndex === -1) {
+    if (!event) {
       return res
         .status(404)
         .json({ success: false, message: "Event not found." });
     }
-
-    const event = store.events[eventIndex];
 
     if (req.user.role === "organizer") {
       return res.status(403).json({
@@ -272,29 +271,12 @@ router.post("/:id/register", authenticate, async (req, res) => {
       });
     }
 
-    if (new Date(event.date) < new Date()) {
+    if (event.startsAt < new Date()) {
       return res.status(400).json({
         success: false,
         message: "Cannot register for a past event.",
       });
     }
-
-    const alreadyRegistered = event.participants.some(
-      (p) => p.userId === req.user.id,
-    );
-    if (alreadyRegistered) {
-      return res.status(409).json({
-        success: false,
-        message: "You are already registered for this event.",
-      });
-    }
-
-    const participant = {
-      userId: req.user.id,
-      name: req.user.name,
-      email: req.user.email,
-      registeredAt: new Date().toISOString(),
-    };
 
     // `event.participants` is the ONLY record of who is registered for what.
     //
@@ -306,24 +288,55 @@ router.post("/:id/register", authenticate, async (req, res) => {
     // remember to repair both. The mirror was also never read by anything.
     //
     // "What is this user registered for?" is now a query over events, backed
-    // in PR 1 by an index on `events.participants.userUuid` — derived, not
-    // stored, so it cannot drift.
-    store.events[eventIndex].participants.push(participant);
-    store.events[eventIndex].updatedAt = new Date().toISOString();
+    // by the index on `events.participants.userUuid` — derived, not stored,
+    // so it cannot drift.
+    //
+    // There is no "already registered?" check here. That check used to read the
+    // array, test it, then push, and two concurrent requests could both pass it.
+    // The repository does the check and the push as one atomic update, and
+    // reports a duplicate as AlreadyRegisteredError.
+    let registered;
+    try {
+      registered = await events.addParticipant(event.id, {
+        userId: req.user.id,
+        name: req.user.name,
+        email: req.user.email,
+      });
+    } catch (err) {
+      if (err instanceof events.AlreadyRegisteredError) {
+        return res.status(409).json({ success: false, message: err.message });
+      }
+      throw err;
+    }
 
-    const fullUser = store.users.find((u) => u.id === req.user.id);
-    sendEventRegistrationEmail(fullUser, event).catch((err) =>
-      console.error("Confirmation email error:", err.message),
+    // The event was deleted between the read above and the update.
+    if (!registered) {
+      return res
+        .status(404)
+        .json({ success: false, message: "Event not found." });
+    }
+
+    const participant = registered.participants.find(
+      (p) => p.userId === req.user.id,
     );
+
+    // The recipient comes from the users repository, the system of record,
+    // rather than from the JWT payload. The lookup is chained into the
+    // fire-and-forget promise rather than awaited. A slow read should not delay
+    // the response any more than a slow SMTP server should, and one `.catch()`
+    // covers a failure in either step (invariant 7).
+    users
+      .findById(req.user.id)
+      .then((fullUser) => sendEventRegistrationEmail(fullUser, registered))
+      .catch((err) => console.error("Confirmation email error:", err.message));
 
     return res.status(200).json({
       success: true,
-      message: `Successfully registered for "${event.title}".`,
+      message: `Successfully registered for "${registered.title}".`,
       registration: {
-        eventId: event.id,
-        eventTitle: event.title,
-        eventDate: event.date,
-        eventTime: event.time,
+        eventId: registered.id,
+        eventTitle: registered.title,
+        eventStartsAt: registered.startsAt,
         registeredAt: participant.registeredAt,
       },
     });
@@ -338,31 +351,26 @@ router.post("/:id/register", authenticate, async (req, res) => {
 // ─────────────────────────────────────────────
 //  DELETE /events/:id/register  – Unregister from event
 // ─────────────────────────────────────────────
-router.delete("/:id/register", authenticate, (req, res) => {
+router.delete("/:id/register", authenticate, async (req, res) => {
   try {
-    const eventIndex = store.events.findIndex((e) => e.id === req.params.id);
+    // Read only to tell "no such event" apart from "not registered". Both are
+    // 404s, but with different messages. The removal itself is one atomic `$pull`.
+    const event = await events.findById(req.params.id);
 
-    if (eventIndex === -1) {
+    if (!event) {
       return res
         .status(404)
         .json({ success: false, message: "Event not found." });
     }
 
-    const event = store.events[eventIndex];
+    const removed = await events.removeParticipant(event.id, req.user.id);
 
-    const participantIndex = event.participants.findIndex(
-      (p) => p.userId === req.user.id,
-    );
-
-    if (participantIndex === -1) {
+    if (!removed) {
       return res.status(404).json({
         success: false,
         message: "You are not registered for this event.",
       });
     }
-
-    store.events[eventIndex].participants.splice(participantIndex, 1);
-    store.events[eventIndex].updatedAt = new Date().toISOString();
 
     return res.status(200).json({
       success: true,
@@ -379,41 +387,46 @@ router.delete("/:id/register", authenticate, (req, res) => {
 // ─────────────────────────────────────────────
 //  GET /events/:id/participants  – View participants (organizer only)
 // ─────────────────────────────────────────────
-router.get("/:id/participants", authenticate, requireOrganizer, (req, res) => {
-  try {
-    // Removed four console.log lines that dumped req.user, req.params, the store
-    // size, and the whole event object — the last of which contains the full
-    // participants array: every attendee's name and email, printed on every call
-    // to this endpoint. This was the worst of the debug logging in the repo,
-    // because it scaled with the number of registered attendees.
-    const event = store.events.find((e) => e.id === req.params.id);
+router.get(
+  "/:id/participants",
+  authenticate,
+  requireOrganizer,
+  async (req, res) => {
+    try {
+      // Removed four console.log lines that dumped req.user, req.params, the store
+      // size, and the whole event object — the last of which contains the full
+      // participants array: every attendee's name and email, printed on every call
+      // to this endpoint. This was the worst of the debug logging in the repo,
+      // because it scaled with the number of registered attendees.
+      const event = await events.findById(req.params.id);
 
-    if (!event) {
-      return res
-        .status(404)
-        .json({ success: false, message: "Event not found." });
-    }
+      if (!event) {
+        return res
+          .status(404)
+          .json({ success: false, message: "Event not found." });
+      }
 
-    if (event.organizerId !== req.user.id) {
-      return res.status(403).json({
-        success: false,
-        message:
-          "Access denied. You can only view participants for your own events.",
+      if (event.organizerId !== req.user.id) {
+        return res.status(403).json({
+          success: false,
+          message:
+            "Access denied. You can only view participants for your own events.",
+        });
+      }
+
+      return res.status(200).json({
+        success: true,
+        eventTitle: event.title,
+        participantCount: event.participants.length,
+        participants: event.participants,
       });
+    } catch (error) {
+      console.error("Get participants error:", error);
+      return res
+        .status(500)
+        .json({ success: false, message: "Internal server error." });
     }
-
-    return res.status(200).json({
-      success: true,
-      eventTitle: event.title,
-      participantCount: event.participants.length,
-      participants: event.participants,
-    });
-  } catch (error) {
-    console.error("Get participants error:", error);
-    return res
-      .status(500)
-      .json({ success: false, message: "Internal server error." });
-  }
-});
+  },
+);
 
 module.exports = router;
