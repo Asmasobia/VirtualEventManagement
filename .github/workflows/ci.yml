@@ -47,7 +47,7 @@ jobs:
         # Without a health gate, GitHub starts the steps as soon as the container
         # exists, and the first test races the database's startup.
         options: >-
-          --health-cmd "mongosh --quiet --eval 'db.adminCommand(\"ping\").ok'"
+          --health-cmd "mongosh --quiet --eval 'db.hello().ok'"
           --health-interval 5s
           --health-timeout 5s
           --health-retries 10
@@ -82,7 +82,20 @@ jobs:
       - name: Start MongoDB and the API
         run: |
           docker network create ci-net
-          docker run -d --name mongo --network ci-net mongo:8.0
+          docker run -d --name mongo --network ci-net \
+            --health-cmd "mongosh --quiet --eval 'db.hello().ok'" \
+            --health-interval 2s --health-timeout 5s --health-retries 30 \
+            mongo:8.0
+
+          # The app connects once at startup and exits if it cannot (by design,
+          # CLAUDE.md invariant 2), so starting it before the database accepts
+          # connections makes it crash. This is the same gate compose.yaml uses.
+          for i in $(seq 1 60); do
+            status="$(docker inspect -f '{{.State.Health.Status}}' mongo)"
+            [ "$status" = "healthy" ] && break
+            sleep 1
+          done
+          test "$status" = "healthy" || { docker logs mongo; exit 1; }
 
           # Generated per run and never printed: the app rejects short or
           # placeholder secrets outside NODE_ENV=test, so this also exercises that
