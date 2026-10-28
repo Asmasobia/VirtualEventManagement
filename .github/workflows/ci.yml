@@ -41,7 +41,11 @@ jobs:
     # connection string, and no secret, needs configuring here.
     services:
       mongo:
-        image: mongo:8.0
+        # 7.0, not 8.0: every 8.x release refuses to start (or crashes) on Linux
+        # kernels 6.19 through 7.0.13, which is what GitHub's ubuntu-latest runner now
+        # ships. 7.0 is the line MongoDB lists as supported on every kernel. See
+        # https://jira.mongodb.org/browse/SERVER-125742 before moving back to 8.x.
+        image: mongo:7.0
         ports:
           - 27017:27017
         # Without a health gate, GitHub starts the steps as soon as the container
@@ -85,7 +89,7 @@ jobs:
           docker run -d --name mongo --network ci-net \
             --health-cmd "mongosh --quiet --eval 'db.hello().ok'" \
             --health-interval 2s --health-timeout 5s --health-retries 30 \
-            mongo:8.0
+            mongo:7.0
 
           # The app connects once at startup and exits if it cannot (by design,
           # CLAUDE.md invariant 2), so starting it before the database accepts
