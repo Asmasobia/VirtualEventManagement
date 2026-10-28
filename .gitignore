@@ -1,0 +1,44 @@
+node_modules/
+
+# ─── Secrets ──────────────────────────────────────────────────────────────────
+# Both patterns are needed, and the reason is the bug this file used to have:
+# `.env.*` matches `.env.local` and `.env.production` but NOT the bare `.env`,
+# because the pattern requires the dot and something after it. So the one file
+# that actually held JWT_SECRET and EMAIL_PASS was the one file not ignored —
+# untracked, but a single `git add .` away from being public forever.
+#
+# Rule of thumb: ignore the exact filename first, then the variants.
+#
+# Verify with `git add --dry-run .` (which prints what WOULD be staged) or
+# `git status --ignored=matching`. Do NOT rely on `git check-ignore -v` here: with a
+# negation in play it reports the last matching rule in a way that is easy to
+# misread as "this file is ignored" when it is not.
+.env
+.env.*
+
+# ...but the committed template has to survive the rule above, or nobody can
+# tell which variables the app needs. A negation must come AFTER the pattern
+# it undoes; gitignore is last-match-wins, not first-match-wins.
+!.env.example
+
+# ─── Test / build output ──────────────────────────────────────────────────────
+coverage/
+*.log
+npm-debug.log*
+
+# ─── OS noise ─────────────────────────────────────────────────────────────────
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# ─── Local-only notes ─────────────────────────────────────────────────────────
+# Working notes that are useful on this machine but must never be published:
+# local database ports, absolute paths containing a username, git identity
+# reminders. The committed counterpart is CLAUDE.md, which is deliberately free of
+# anything machine- or person-specific.
+#
+# The `*.local.*` shape is the convention worth keeping: it makes "this file is
+# private" visible in the filename itself, so a future file does not need a new
+# ignore rule and nobody has to remember one.
+*.local.md
+*.local.json

@@ -1,0 +1,63 @@
+# ─────────────────────────────────────────────────────────────────────────────
+#  Local stack: the API plus the MongoDB it needs. For development and demos, not a
+#  production deployment — there is no TLS, no auth on the database, and the data
+#  lives in a single-host volume.
+#
+#  Usage:  cp .env.example .env  (fill in JWT_SECRET etc.)  then  docker compose up --build
+# ─────────────────────────────────────────────────────────────────────────────
+
+services:
+  mongo:
+    # 7.0, not 8.0: every 8.x release refuses to start (or crashes) on Linux
+    # kernels 6.19 through 7.0.13, which is what GitHub's ubuntu-latest runner now
+    # ships. 7.0 is the line MongoDB lists as supported on every kernel. See
+    # https://jira.mongodb.org/browse/SERVER-125742 before moving back to 8.x.
+    image: mongo:7.0
+    volumes:
+      - mongo-data:/data/db
+    # No `ports:` on purpose. The app reaches the database over the compose network
+    # by service name; publishing 27017 would expose an unauthenticated database to
+    # everything that can reach the host. To inspect data, use
+    # `docker compose exec mongo mongosh virtual_events`.
+    healthcheck:
+      test:
+        ["CMD", "mongosh", "--quiet", "--eval", "db.adminCommand('ping').ok"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+      start_period: 10s
+
+  api:
+    build: .
+    env_file: .env
+    # `environment` wins over `env_file`. The connection string in a developer's .env
+    # points at 127.0.0.1, which inside this container is the container itself, not
+    # the database — so it is overridden here with the service name. The URI contains
+    # no credentials (the database has no auth), so it is safe to commit.
+    environment:
+      MONGODB_URI: mongodb://mongo:27017/virtual_events
+      PORT: "3000"
+    ports:
+      - "3000:3000"
+    # Waits for the database to answer a ping, not merely for its container to
+    # exist. Without this the app can start first, fail config/connection at
+    # startup, exit, and only succeed on a restart.
+    depends_on:
+      mongo:
+        condition: service_healthy
+    # Orchestrators restart a crashed process; the app deliberately exits non-zero on
+    # bad config (CLAUDE.md invariant 2), so a restart loop here is a signal, not noise.
+    restart: unless-stopped
+    # Probes /ready rather than /health: "can this instance serve traffic" includes
+    # the database. /health stays dependency-free (invariant 5) for liveness use.
+    # busybox `wget` ships in the alpine base image; no extra package needed.
+    healthcheck:
+      test:
+        ["CMD", "wget", "-q", "-O", "/dev/null", "http://127.0.0.1:3000/ready"]
+      interval: 10s
+      timeout: 3s
+      retries: 3
+      start_period: 10s
+
+volumes:
+  mongo-data:

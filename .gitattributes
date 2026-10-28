@@ -1,0 +1,44 @@
+# ─────────────────────────────────────────────────────────────────────────────
+#  Line endings, decided by the repository rather than by whoever cloned it.
+#
+#  THE PROBLEM THIS SOLVES, which is worth understanding because it wastes a
+#  genuinely surprising amount of time:
+#
+#  Git has a setting called `core.autocrlf`. On Windows it is commonly `true`,
+#  which means "store LF in the repository, but convert to CRLF in my working
+#  directory on checkout." It is a per-machine setting, so it is not shared, and
+#  every contributor may have it set differently.
+#
+#  That produces two failures that look unrelated to their cause:
+#
+#    • Prettier is configured here with `endOfLine: lf`. After a checkout on a
+#      machine with autocrlf=true, every file on disk has CRLF endings, so
+#      `npm run format:check` fails on all of them — while the identical commit
+#      passes in Linux CI. The report is "my formatter is broken", the cause is a
+#      git setting nobody looked at.
+#
+#    • Someone with a different setting touches one line of a file and the diff
+#      shows all 400 lines changed, because the endings were rewritten too. The
+#      real change becomes unreviewable.
+#
+#  `text=auto eol=lf` tells git: treat these as text, normalise to LF on commit,
+#  AND check them out as LF regardless of what core.autocrlf says locally. The
+#  bytes on disk now match the bytes in the repository on every platform, so
+#  Prettier, ESLint and CI all agree.
+#
+#  WHY IN THE REPO RATHER THAN A GIT SETTING: .gitattributes is committed, so it
+#  applies to everyone who clones — including CI and any future contributor. A
+#  `git config` fix works on exactly one machine and has to be remembered again on
+#  the next one. Configuration that must hold for the project belongs in the
+#  project.
+# ─────────────────────────────────────────────────────────────────────────────
+
+* text=auto eol=lf
+
+# Explicitly binary, so git never attempts line-ending conversion on them.
+# Corrupting a PNG by rewriting bytes that happened to look like a CRLF is a real
+# thing that happens when this is left off.
+*.png binary
+*.jpg binary
+*.ico binary
+*.pdf binary
