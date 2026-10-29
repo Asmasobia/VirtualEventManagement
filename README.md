@@ -31,8 +31,8 @@ cp .env.example .env     # set JWT_SECRET
 docker compose up --build
 ```
 
-> CI builds the image and runs it against MongoDB on every push. `compose.yaml` itself
-> has not been run yet. See [Status](#status).
+> CI builds the image and runs it against MongoDB on every push, and `docker compose up`
+> has been run end to end. See [Status](#status).
 
 The server exposes `GET /health` (is the process up) and `GET /ready` (is the database
 reachable) — see [Design decisions](#design-decisions).
@@ -182,8 +182,12 @@ must be running before `npm test`.
   MongoDB, plus a `container` job that builds the production image, waits for
   `/ready`, and confirms graceful shutdown (SIGTERM closes the MongoDB connection and
   exits 0). MongoDB is pinned to 7.0 because 8.x refuses to start on the runner's
-  kernel (SERVER-121912). `compose.yaml` uses the same images but has not itself been
-  run.
+  kernel (SERVER-121912).
+- **`docker compose up --build` verified locally**: MongoDB passes its health check
+  before the API starts; sign-up, login, event creation and registration work; two
+  concurrent registrations for a one-place event give one `200` and one `409`; a
+  repeated registration returns the original; `docker compose stop` exits 0 after
+  draining HTTP and closing the MongoDB connection.
 - **Known gaps:** capacity cannot be edited after creation; email is fire-and-forget,
   so a crash between committing a registration and sending the email loses the email
   with no record it was owed (fine for a courtesy message, not for a password reset —
